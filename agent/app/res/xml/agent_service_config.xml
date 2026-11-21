@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍服务配置:
+  · 收窗口变化/内容变化事件(仅用于保持连接,逻辑不依赖事件)
+  · canRetrieveWindowContent:能读屏幕节点(screenTexts / clickText / 输入)
+  · canPerformGestures:能合成触摸(tap / swipe,小米电视无触摸屏但合成手势有效)
+  · flagReportViewIds + flagIncludeNotImportantViews:尽量拿到完整节点树
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows"
+    android:notificationTimeout="100"
+    android:canRetrieveWindowContent="true"
+    android:canPerformGestures="true"/>

@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<!--
+  电视Agent·直连版 遥控页(手机浏览器打开 http://<电视IP>:9999/)
+
+  · 触控板 = 指针模式:维护虚拟光标(1920×1080),慢滑移动、轻点确认、
+    双指滑动 = 返回、快滑(单步 >120px)= 大步长翻页
+  · 顶栏小圆钮:返回 / 主页 / 音量±(显示 from→to)
+  · 播放控制:⏪快退 ☰唤出菜单 ⏩快进 ⛶全屏 清晰度(选项可点,10 秒自动隐藏)
+  · 指令三模式(存 localStorage tvmode2):
+      🎤 语音 = 录音(PCM 16k WAV)→ /api/asr(硅基流动 Qwen3-Omni)
+      📝 文字 = 输入整句指令 → /api/textcmd(魔搭 Qwen3.5)
+      ⚡ 直发 = 输入片名 → /api/search 直接搜,不经过模型
+  · 键盘输入:「填入」/「填入并搜索」→ /api/text(需电视当前界面有输入框)
+  · 状态条:10s 轮询 /api/status;a11y=false 红点提示未开无障碍
+  · 收到 blocked:"xiaoi" 一律红 toast:小爱正在使用,请先关闭小爱再操作电视
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0b0e14">
+<title>电视Agent·直连版</title>
+<style>
+  :root{
+    --bg:#0b0e14; --card:#161b26; --card2:#1d2432; --line:#2a3346;
+    --text:#e7ecf5; --muted:#8a94a8; --hint:#5b6579;
+    --accent:#3b82f6; --accent-soft:#1e3a5f;
+    --ok:#22c55e; --err:#ef4444; --warn:#f59e0b; --radius:14px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+    user-select:none;-webkit-user-select:none;
+    touch-action:manipulation;
+  }
+
+  /* ===== 顶部标题 + 状态条 ===== */
+  #hdr{
+    flex:none;text-align:center;font-size:13px;letter-spacing:1px;color:var(--text);
+    padding:10px 0 0;max-width:520px;width:100%;margin:0 auto;
+  }
+  #status{
+    flex:none;display:flex;align-items:center;gap:8px;
+    font-size:12px;color:var(--muted);padding:6px 14px 4px;
+    max-width:520px;width:100%;margin:0 auto;
+  }
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--hint);flex:none}
+  .dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+  .dot.off{background:var(--err);box-shadow:0 0 6px var(--err)}
+
+  /* ===== 上部 55% 触控区 ===== */
+  #topwrap{
+    flex:none;height:55%;min-height:260px;
+    display:flex;flex-direction:column;padding:4px 14px 6px;
+    max-width:520px;width:100%;margin:0 auto;
+  }
+  #padbar{
+    flex:none;display:flex;align-items:center;gap:8px;padding:2px 2px 8px;
+  }
+  #padbar .t{font-size:12px;color:var(--muted)}
+  #senswrap{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
+  #sens{width:80px;accent-color:var(--accent)}
+  #sensval{min-width:26px;text-align:right;color:var(--text)}
+  .padkeys{margin-left:auto;display:flex;gap:8px}
+  .rnd{
+    width:36px;height:36px;border-radius:50%;border:1px solid var(--line);
+    background:var(--card);color:var(--text);font-size:11px;line-height:1;
+    padding:0;font-family:inherit;display:flex;align-items:center;justify-content:center;
+  }
+  .rnd:active{background:var(--card2);transform:scale(.94)}
+  .rnd.big{font-size:14px}
+
+  #pad{
+    flex:1;border:1px solid var(--line);border-radius:18px;
+    background:linear-gradient(160deg,var(--card) 0%,var(--card2) 100%);
+    position:relative;overflow:hidden;
+    touch-action:none;
+  }
+  #padlabel{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    color:var(--hint);font-size:13px;pointer-events:none;letter-spacing:1px;
+    text-align:center;line-height:1.7;
+  }
+  #padhint{
+    position:absolute;left:0;right:0;bottom:8px;text-align:center;
+    color:var(--hint);font-size:11px;pointer-events:none;
+  }
+  #pad .active-ring{position:absolute;inset:0;border:2px solid var(--accent);border-radius:18px;opacity:0;pointer-events:none;transition:opacity .15s}
+  #pad.touching .active-ring{opacity:.6}
+
+  /* ===== 下部 ===== */
+  #bottom{
+    flex:1;min-height:240px;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    padding:6px 14px calc(14px + env(safe-area-inset-bottom));
+    max-width:520px;width:100%;margin:0 auto;user-select:text;-webkit-user-select:text;
+  }
+  .sec-title{font-size:11px;color:var(--hint);margin:10px 2px 6px;letter-spacing:1px;display:flex;align-items:center;gap:8px}
+
+  /* 播放控制 */
+  #playerbar{display:flex;gap:8px;flex-wrap:wrap}
+  .pbtn{
+    flex:1;min-width:56px;border:1px solid var(--line);background:var(--card);color:var(--text);
+    font-size:13px;padding:9px 4px;border-radius:10px;font-family:inherit;padding:9px 6px;
+  }
+  .pbtn:active{background:var(--card2);transform:scale(.96)}
+  #qopts{display:none;gap:6px;flex-wrap:wrap;margin-top:8px}
+  #qopts.show{display:flex}
+  .qbtn{
+    border:1px solid var(--accent);background:var(--accent-soft);color:#9cc3f7;
+    font-size:12px;padding:6px 10px;border-radius:999px;font-family:inherit;
+  }
+  .qbtn:active{transform:scale(.95)}
+
+  /* 指令模式按钮 */
+  .modes{display:flex;gap:6px}
+  .modebtn{
+    border:1px solid var(--line);background:var(--card);color:var(--muted);
+    font-size:13px;padding:4px 9px;border-radius:999px;font-family:inherit;line-height:1;
+  }
+  .modebtn.sel{background:var(--accent-soft);border-color:var(--accent);color:#9cc3f7}
+  #modehint{color:var(--hint);font-size:10px;margin-left:auto;text-align:right;line-height:1.4}
+
+  /* 语音:按钮居中 */
+  #micwrap{display:flex;flex-direction:column;align-items:center;gap:8px}
+  #micbtn{
+    width:96px;height:96px;border-radius:50%;border:2px solid var(--line);flex:none;
+    background:var(--card);color:var(--text);font-size:34px;font-family:inherit;padding:0;
+    display:flex;align-items:center;justify-content:center;
+  }
+  #micbtn.rec{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}50%{box-shadow:0 0 0 12px rgba(239,68,68,0)}}
+  #micstate{text-align:center;font-size:13px;color:var(--muted);line-height:1.6}
+  #micstate b{color:var(--text);font-weight:500}
+
+  .row{display:flex;gap:8px}
+  input[type=text]{
+    flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;
+    padding:11px 12px;font-size:15px;color:var(--text);background:var(--card);
+    outline:none;font-family:inherit;
+  }
+  input[type=text]:focus{border-color:var(--accent)}
+  select{
+    border:1px solid var(--line);border-radius:10px;padding:11px 8px;font-size:14px;
+    color:var(--text);background:var(--card);font-family:inherit;max-width:38%;
+  }
+  button.act{
+    font-family:inherit;font-size:14px;border-radius:10px;border:1px solid transparent;
+    padding:11px 14px;background:var(--accent);color:#fff;flex:none;
+  }
+  button.act.ghost{background:var(--card);border-color:var(--line);color:var(--text)}
+  button.act:active{transform:scale(.97)}
+  .busy{opacity:.5;pointer-events:none}
+  .hint{font-size:11px;color:var(--hint);margin-top:5px;line-height:1.5}
+
+  #result{
+    margin-top:10px;font-size:12px;line-height:1.7;color:var(--muted);
+    background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;
+    white-space:pre-wrap;word-break:break-all;display:none;max-height:150px;overflow-y:auto;
+  }
+  #result.show{display:block}
+
+  /* ===== toast ===== */
+  #toast{
+    position:fixed;left:50%;bottom:30%;transform:translateX(-50%) translateY(16px);
+    background:#252c3b;color:#fff;font-size:13px;padding:11px 18px;border-radius:999px;
+    opacity:0;pointer-events:none;transition:opacity .22s,transform .22s;
+    max-width:86vw;text-align:center;line-height:1.5;z-index:99;border:1px solid var(--line);
+  }
+  #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.err{background:#5b1d1d;border-color:var(--err);color:#fecaca}
+</style>
+</head>
+<body>
+
+<!-- 标题 + 状态条 -->
+<div id="hdr">电视Agent · 直连版</div>
+<div id="status">
+  <span class="dot" id="dot"></span>
+  <span id="stext">连接中…</span>
+</div>
+
+<!-- 上部:指针触控板 + 小圆钮 -->
+<div id="topwrap">
+  <div id="padbar">
+    <span class="t">指针</span>
+    <span id="senswrap">
+      灵敏度<input type="range" id="sens" min="0.5" max="3.0" step="0.1" value="1.5">
+      <span id="sensval">1.5</span>
+    </span>
+    <div class="padkeys">
+      <button class="rnd" id="kVolDn">−</button>
+      <button class="rnd big" id="kVolUp">＋</button>
+      <button class="rnd big" id="kHome">⌂</button>
+      <button class="rnd" id="kBack">←</button>
+    </div>
+  </div>
+  <div id="pad">
+    <div id="padlabel">慢滑 = 移动指针 / 轻点 = 确认<br>双指滑动 = 返回</div>
+    <div id="padhint">快滑(单步 &gt;120px)= 大步长翻页 · 屏幕坐标 1920×1080</div>
+    <div class="active-ring"></div>
+  </div>
+</div>
+
+<!-- 下部 -->
+<div id="bottom">
+
+  <div class="sec-title">播放控制</div>
+  <div id="playerbar">
+    <button class="pbtn" data-p="backward">⏪ 快退</button>
+    <button class="pbtn" data-p="center">☰ 菜单</button>
+    <button class="pbtn" data-p="forward">⏩ 快进</button>
+    <button class="pbtn" data-p="fullscreen">⛶ 全屏</button>
+    <button class="pbtn" data-p="quality">清晰度</button>
+  </div>
+  <div id="qopts"></div>
+
+  <div class="sec-title">
+    <span>语音</span>
+    <span class="modes">
+      <button class="modebtn" data-mode="voice" title="语音模式">🎤</button>
+      <button class="modebtn" data-mode="text" title="文字指令模式">📝</button>
+      <button class="modebtn" data-mode="direct" title="直发模式">⚡</button>
+    </span>
+    <span id="modehint"></span>
+  </div>
+  <div id="micwrap">
+    <button id="micbtn">🎤</button>
+    <div id="micstate">按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span></div>
+  </div>
+
+  <div class="sec-title">键盘输入</div>
+  <div class="row">
+    <input id="txt" type="text" placeholder="输入文字填到电视" autocomplete="off" autocorrect="off" autocapitalize="off">
+    <button class="act ghost" id="btnTextFill">填入</button>
+    <button class="act" id="btnTextSearch">填入并搜索</button>
+  </div>
+  <div class="hint">先在电视上点开搜索框,然后在手机上打字;长按输入框用输入法自带语音转文字也能填</div>
+
+  <div class="sec-title">搜片</div>
+  <div class="row">
+    <select id="appsel"><option value="">加载应用…</option></select>
+    <input id="q" type="text" placeholder="片名 / 整句指令" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="search">
+    <button class="act" id="btnGo">搜片</button>
+  </div>
+
+  <div id="result"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const $$ = s => document.querySelectorAll(s);
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+/* ================= 通用 ================= */
+function toast(msg, isErr) {
+  const t = $('#toast');
+  t.textContent = msg;
+  t.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.className = ''; }, isErr ? 4000 : 1800);
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+/* 小爱守卫:agent 拒绝在小爱前台时动电视 */
+function isBlocked(r) { return r && r.blocked === 'xiaoi'; }
+function blockedToast() { toast('小爱正在使用,请先关闭小爱再操作电视', true); }
+
+/* ================= 状态轮询(10s) ================= */
+async function refreshStatus() {
+  try {
+    const s = await api('/api/status');
+    const on = s.a11y === true;
+    $('#dot').className = 'dot ' + (on ? 'on' : 'off');
+    let txt = on ? '已连接 · 无障碍开启' : '已连接 · 电视上未开启无障碍(红点即去设置开启)';
+    if (on && s.topPkg) txt += ' · 前台:' + String(s.topPkg).slice(0, 24);
+    $('#stext').textContent = txt;
+  } catch (e) {
+    $('#dot').className = 'dot off';
+    $('#stext').textContent = '服务未响应(确认手机与电视同一局域网)';
+  }
+}
+
+/* ================= 应用列表 ================= */
+async function loadApps() {
+  let apps = [];
+  try {
+    const a = await api('/api/apps');
+    apps = (a.apps || []).filter(x => x.installed);
+  } catch (e) { apps = []; }
+  const sel = $('#appsel');
+  const saved = localStorage.getItem('agapp') || '';
+  sel.innerHTML = '';
+  if (!apps.length) {
+    sel.innerHTML = '<option value="">电视上无已装应用</option>';
+    return;
+  }
+  apps.forEach(x => {
+    const o = document.createElement('option');
+    o.value = x.name;
+    o.textContent = x.name;
+    if (x.name === saved) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+$('#appsel').addEventListener('change', e => localStorage.setItem('agapp', e.target.value));
+
+/* ================= 顶栏小圆钮 ================= */
+$('#kBack').onclick = () => api('/api/global', { action: 'back' }).catch(e => toast('失败:' + e.message, true));
+$('#kHome').onclick = () => api('/api/global', { action: 'home' }).catch(e => toast('失败:' + e.message, true));
+async function vol(d) {
+  try {
+    const r = await api('/api/vol', { delta: d });
+    if (r.ok) toast('音量 ' + r.from + ' → ' + r.to);
+    else toast(r.error || '音量失败', true);
+  } catch (e) { toast('请求出错:' + e.message, true); }
+}
+$('#kVolUp').onclick = () => vol(1);
+$('#kVolDn').onclick = () => vol(-1);
+
+/* ================= 触控板:虚拟指针 ================= */
+let sens = parseFloat(localStorage.getItem('agsens') || '1.5') || 1.5;
+$('#sens').value = sens;
+$('#sensval').textContent = sens.toFixed(1);
+$('#sens').oninput = e => {
+  sens = parseFloat(e.target.value);
+  $('#sensval').textContent = sens.toFixed(1);
+  localStorage.setItem('agsens', String(sens));
+};
+
+// 虚拟光标(屏幕 1920×1080,初始中心,localStorage 记忆)
+let cx = clamp(parseFloat(localStorage.getItem('agtx') || '960') || 960, 0, 1919);
+let cy = clamp(parseFloat(localStorage.getItem('agty') || '540') || 540, 0, 1079);
+function savePos() {
+  localStorage.setItem('agtx', String(Math.round(cx)));
+  localStorage.setItem('agty', String(Math.round(cy)));
+}
+
+function sendSwipe(x1, y1, x2, y2, dur) {
+  return api('/api/swipe', {
+    x1: Math.round(x1), y1: Math.round(y1),
+    x2: Math.round(x2), y2: Math.round(y2), dur: dur
+  }).then(r => { if (isBlocked(r)) blockedToast(); })
+    .catch(e => toast('触控失败:' + e.message, true));
+}
+
+// 长滑翻页:从屏幕中心向对应方向 700px,出界 clamp
+function pageFlip(dir) {
+  const px = 960, py = 540;
+  let tx = px, ty = py;
+  if (dir === 'left') tx = px - 700;
+  else if (dir === 'right') tx = px + 700;
+  else if (dir === 'up') ty = py - 700;
+  else ty = py + 700;
+  sendSwipe(px, py, clamp(tx, 0, 1919), clamp(ty, 0, 1079), 250);
+}
+
+const pad = $('#pad');
+let touching = false, lastX = 0, lastY = 0, startT = 0;
+let accX = 0, accY = 0, lastSend = 0;
+let twoFinger = false, backSent = false, flicked = false, maxStep = 0;
+
+// 把累计位移×灵敏度合成一次指针滑动(80ms 节流)
+function flushMove(force) {
+  const now = Date.now();
+  if (!force && now - lastSend < 80) return;
+  const nx = clamp(cx + accX * sens, 0, 1919);
+  const ny = clamp(cy + accY * sens, 0, 1079);
+  accX = 0; accY = 0;
+  if (nx === cx && ny === cy) return;
+  const ox = cx, oy = cy;
+  lastSend = now;
+  cx = nx; cy = ny;
+  savePos();
+  sendSwipe(ox, oy, nx, ny, 120);
+}
+
+pad.addEventListener('touchstart', e => {
+  if (e.touches.length >= 2) { twoFinger = true; backSent = false; }
+  if (e.touches.length === 1 && !touching) {
+    touching = true; twoFinger = false;
+    lastX = e.touches[0].clientX;
+    lastY = e.touches[0].clientY;
+    startT = Date.now();
+    accX = 0; accY = 0; lastSend = 0;
+    flicked = false; maxStep = 0;
+    pad.classList.add('touching');
+  }
+  e.preventDefault();
+}, { passive: false });
+
+pad.addEventListener('touchmove', e => {
+  if (twoFinger) {                 // 双指:整段手势只发一次返回
+    if (!backSent) {
+      backSent = true;
+      api('/api/global', { action: 'back' })
+        .then(r => { if (isBlocked(r)) blockedToast(); })
+        .catch(err => toast('返回失败:' + err.message, true));
+    }
+    e.preventDefault();
+    return;
+  }
+  if (!touching || flicked) { e.preventDefault(); return; }
+  const t = e.touches[0];
+  if (!t) return;
+  const dx = t.clientX - lastX, dy = t.clientY - lastY;
+  lastX = t.clientX; lastY = t.clientY;
+  const step = Math.hypot(dx, dy);
+  maxStep = Math.max(maxStep, step);
+  if (step > 120) {                // 快滑:大步长翻页,本手势不再动指针
+    flicked = true;
+    accX = 0; accY = 0;
+    pageFlip(Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'down' : 'up'));
+    e.preventDefault();
+    return;
+  }
+  accX += dx; accY += dy;
+  flushMove(false);
+  e.preventDefault();
+}, { passive: false });
+
+function padEnd(e) {
+  if (e.touches && e.touches.length > 0) return;   // 还有手指在板上
+  if (!touching && !twoFinger) return;
+  touching = false;
+  pad.classList.remove('touching');
+  const dt = Date.now() - startT;
+  if (twoFinger) {
+    /* 返回已在 move 时发过 */
+  } else if (flicked) {
+    /* 翻页已发 */
+  } else if (dt < 200 && maxStep < 10) {
+    // 轻点:点在虚拟光标处
+    api('/api/tap', { x: Math.round(cx), y: Math.round(cy) })
+      .then(r => { if (isBlocked(r)) blockedToast(); })
+      .catch(err => toast('点击失败:' + err.message, true));
+  } else {
+    flushMove(true);   // 补发残余小位移
+  }
+  twoFinger = false; backSent = false; flicked = false;
+  accX = 0; accY = 0;
+  e.preventDefault();
+}
+pad.addEventListener('touchend', padEnd, { passive: false });
+pad.addEventListener('touchcancel', padEnd, { passive: false });
+
+/* ================= 播放控制 ================= */
+function showQualityOpts(list) {
+  const box = $('#qopts');
+  clearTimeout(box._timer);
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<span class="hint">没读到清晰度/线路选项,请先在播放页试一次</span>';
+  } else {
+    list.forEach(t => {
+      const b = document.createElement('button');
+      b.className = 'qbtn';
+      b.textContent = t;
+      b.onclick = () => playerAction('pick', { text: t });
+      box.appendChild(b);
+    });
+  }
+  box.classList.add('show');
+  box._timer = setTimeout(hideQualityOpts, 10000);   // 10 秒没选自动隐藏
+}
+function hideQualityOpts() {
+  const box = $('#qopts');
+  clearTimeout(box._timer);
+  box.classList.remove('show');
+  box.innerHTML = '';
+}
+
+async function playerAction(action, extra) {
+  try {
+    const r = await api('/api/player', Object.assign({ action: action }, extra || {}));
+    if (isBlocked(r)) return blockedToast();
+    if (!r.ok) return toast(r.error || '操作失败', true);
+    if (action === 'quality') showQualityOpts(r.screen || []);
+    else if (action === 'pick') { hideQualityOpts(); toast('已选择:' + (extra ? extra.text : '')); }
+    else if (action === 'center') toast('已唤出/隐藏控制条');
+    else if (action === 'forward') toast('快进中…');
+    else if (action === 'backward') toast('快退中…');
+    else if (action === 'fullscreen') toast('已切全屏');
+  } catch (e) { toast('请求出错:' + e.message, true); }
+}
+$('#playerbar').addEventListener('click', e => {
+  const b = e.target.closest('[data-p]');
+  if (b) playerAction(b.dataset.p);
+});
+
+/* ================= 指令三模式 ================= */
+let mode = localStorage.getItem('tvmode2') || 'voice';
+
+function applyMode() {
+  $$('.modebtn').forEach(b => b.classList.toggle('sel', b.dataset.mode === mode));
+  $('#micwrap').style.display = (mode === 'voice') ? 'flex' : 'none';
+  $('#modehint').textContent =
+    mode === 'voice' ? '按住麦克风说话'
+    : mode === 'text' ? '输入整句指令(可长按输入框用输入法语音转文字)'
+    : '输入片名+选应用,直接搜不经模型';
+  $('#btnGo').textContent = mode === 'voice' ? '搜片' : (mode === 'text' ? '发指令' : '直发');
+  localStorage.setItem('tvmode2', mode);
+}
+$$('.modebtn').forEach(b => b.onclick = () => { mode = b.dataset.mode; applyMode(); });
+
+/* 指令类响应(asr / textcmd)统一展示 */
+function showIntentResult(r) {
+  if (isBlocked(r)) return blockedToast();
+  if (r.path === 'failed' || r.ok === false) return toast(r.error || '识别失败', true);
+  const res = r.result || {};
+  const lines = [];
+  if (res.corrected) lines.push('识别:' + res.corrected);
+  if (r.message) lines.push(r.message);
+  if (Array.isArray(r.steps) && r.steps.length) lines.push('步骤:\n' + r.steps.join('\n'));
+  if (Array.isArray(r.screen) && r.screen.length) lines.push('屏幕:\n· ' + r.screen.join('\n· '));
+  if (lines.length) showResult(lines.join('\n'));
+  toast(r.executed ? (r.message || '已执行') : (res.corrected || '未识别到指令'), !r.executed);
+  if (res.query && !$('#q').value) $('#q').value = res.query;
+}
+
+/* 搜片类响应(direct 模式 / voice 模式搜片按钮)统一展示 */
+async function doSearchApi(app, q) {
+  $('#btnGo').classList.add('busy');
+  toast('正在电视上操作…');
+  try {
+    const r = await api('/api/search', { app: app, query: q });
+    if (isBlocked(r)) { blockedToast(); return; }
+    const lines = [];
+    if (r.message) lines.push(r.message);
+    if (r.error) lines.push('失败:' + r.error);
+    if (Array.isArray(r.steps) && r.steps.length) lines.push('步骤:\n' + r.steps.join('\n'));
+    if (Array.isArray(r.screen) && r.screen.length) lines.push('屏幕:\n· ' + r.screen.join('\n· '));
+    showResult(lines.join('\n') || JSON.stringify(r));
+    toast(r.ok ? ('已搜索:' + q) : (r.error || '失败'), !r.ok);
+  } catch (e) {
+    toast('请求出错:' + e.message, true);
+  } finally {
+    $('#btnGo').classList.remove('busy');
+  }
+}
+
+$('#btnGo').onclick = async () => {
+  const text = $('#q').value.trim();
+  if (!text) return toast('先输入内容', true);
+  if (mode === 'direct') {
+    const app = $('#appsel').value;
+    if (!app) return toast('先选择应用', true);
+    doSearchApi(app, text);
+  } else if (mode === 'text') {
+    $('#btnGo').classList.add('busy');
+    try {
+      const r = await api('/api/textcmd', { text: text });
+      showIntentResult(r);
+    } catch (e) {
+      toast('请求出错:' + e.message, true);
+    } finally {
+      $('#btnGo').classList.remove('busy');
+    }
+  } else {
+    // 语音模式:搜片按钮保持直发 /api/search 的老行为
+    const app = $('#appsel').value;
+    if (!app) return toast('先选择应用', true);
+    doSearchApi(app, text);
+  }
+};
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnGo').click(); });
+
+/* ================= 语音:PCM 采集 → WAV ================= */
+const MIC_IDLE = '按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span>';
+let recording = false, audioCtx = null, srcNode = null, procNode = null, micStream = null;
+let pcmChunks = [], recStart = 0, recTimer = null;
+
+async function startRec() {
+  if (recording) return;
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    return toast('无法获取麦克风:' + e.message, true);
+  }
+  // 目标 16k 采样;浏览器不支持时退默认采样率,WAV 头写真实值即可
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  } catch (e) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  const rate = audioCtx.sampleRate;
+  pcmChunks = [];
+  srcNode = audioCtx.createMediaStreamSource(micStream);
+  procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+  procNode.onaudioprocess = ev => {
+    pcmChunks.push(new Float32Array(ev.inputBuffer.getChannelData(0)));
+  };
+  const sink = audioCtx.createGain();
+  sink.gain.value = 0;   // 静音输出,保住 ScriptProcessor 管线
+  srcNode.connect(procNode);
+  procNode.connect(sink);
+  sink.connect(audioCtx.destination);
+
+  recording = true;
+  recStart = Date.now();
+  $('#micbtn').classList.add('rec');
+  $('#micstate').innerHTML = '<b>录音中…</b> 松手发送';
+  let left = 15;
+  recTimer = setInterval(() => {
+    left--;
+    $('#micstate').innerHTML = '<b>录音中…</b> ' + left + 's 后自动停止';
+    if (left <= 0) stopRec();
+  }, 1000);
+}
+
+function stopRec() {
+  if (!recording) return;
+  recording = false;
+  clearInterval(recTimer);
+  $('#micbtn').classList.remove('rec');
+  const rate = audioCtx ? audioCtx.sampleRate : 16000;
+  try { if (procNode) procNode.disconnect(); } catch (e) {}
+  try { if (srcNode) srcNode.disconnect(); } catch (e) {}
+  if (micStream) micStream.getTracks().forEach(t => t.stop());
+  try { if (audioCtx) audioCtx.close(); } catch (e) {}
+  procNode = null; srcNode = null; micStream = null; audioCtx = null;
+
+  const dur = (Date.now() - recStart) / 1000;
+  if (dur < 0.4) {
+    $('#micstate').innerHTML = MIC_IDLE;
+    return toast('说话太短', true);
+  }
+  $('#micstate').textContent = '识别中…';
+  const wav = encodeWav(pcmChunks, rate);
+  pcmChunks = [];
+  b64Of(wav)
+    .then(b64 => api('/api/asr', { audio_base64: b64, mime: 'audio/wav' }))
+    .then(r => { showIntentResult(r); })
+    .catch(e => toast('识别失败:' + e.message, true))
+    .then(() => { $('#micstate').innerHTML = MIC_IDLE; });
+}
+
+/* Float32 分片 → 16bit 单声道 WAV(44 字节头),采样率用 Context 实际值 */
+function encodeWav(chunks, rate) {
+  let n = 0;
+  chunks.forEach(c => { n += c.length; });
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const wr = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  wr(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); wr(8, 'WAVE');
+  wr(12, 'fmt '); v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);    // PCM
+  v.setUint16(22, 1, true);    // 单声道
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  wr(36, 'data'); v.setUint32(40, n * 2, true);
+  let off = 44;
+  chunks.forEach(c => {
+    for (let i = 0; i < c.length; i++) {
+      let s = Math.max(-1, Math.min(1, c[i]));
+      v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      off += 2;
+    }
+  });
+  return new Uint8Array(buf);
+}
+
+function b64Of(bytes) {
+  return new Promise((resolve, reject) => {
+    let s = '', CH = 0x8000;
+    try {
+      for (let i = 0; i < bytes.length; i += CH) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      }
+      resolve(btoa(s));
+    } catch (e) { reject(e); }
+  });
+}
+
+$('#micbtn').addEventListener('touchstart', e => { e.preventDefault(); startRec(); }, { passive: false });
+$('#micbtn').addEventListener('touchend', e => { e.preventDefault(); stopRec(); }, { passive: false });
+$('#micbtn').addEventListener('touchcancel', () => stopRec());
+// 桌面鼠标兜底
+$('#micbtn').addEventListener('mousedown', () => startRec());
+$('#micbtn').addEventListener('mouseup', () => stopRec());
+
+/* ================= 键盘输入:填入 / 填入并搜索 ================= */
+async function sendText(submit) {
+  const v = $('#txt').value.trim();
+  if (!v) return toast('先输入文字', true);
+  const btn = submit ? $('#btnTextSearch') : $('#btnTextFill');
+  btn.classList.add('busy');
+  try {
+    const r = await api('/api/text', submit ? { value: v, submit: true } : { value: v });
+    if (isBlocked(r)) return blockedToast();
+    if (r.ok) {
+      $('#txt').value = '';
+      let msg = '已填入:' + v + '\n电视输入框当前:' + (r.typed || '(空)');
+      if (submit && Array.isArray(r.screen) && r.screen.length) {
+        msg += '\n屏幕:\n· ' + r.screen.join('\n· ');
+      }
+      showResult(msg);
+      toast(submit ? '已填入并点搜索' : '已填入电视输入框');
+    } else {
+      toast(r.error || '失败(需电视当前界面有输入框)', true);
+    }
+  } catch (e) {
+    toast('请求出错:' + e.message, true);
+  } finally {
+    btn.classList.remove('busy');
+  }
+}
+$('#btnTextFill').onclick = () => sendText(false);
+$('#btnTextSearch').onclick = () => sendText(true);
+$('#txt').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(false); });
+
+/* ================= 结果区 ================= */
+function showResult(text) {
+  const el = $('#result');
+  el.textContent = text;
+  el.classList.add('show');
+}
+
+/* ================= 初始化 ================= */
+applyMode();
+refreshStatus();
+loadApps();
+setInterval(refreshStatus, 10000);
+</script>
+</body>
+</html>
