@@ -96,6 +96,30 @@ public class HttpServerCore {
     private volatile List<SpecialRec> specialList;
 
     /** 短操作(点击/滑动/输入等)统一用这把锁保序 */
+    /** [自愈] 无障碍被系统静默回收时(WRITE_SECURE_SETTINGS 已由 adb 授予),
+     *  自己把 AgentService 重新启用。返回 null=就绪;否则返回提示文案。 */
+    private String ensureAccessibility() {
+        if (AgentService.instance != null) return null;
+        try {
+            android.provider.Settings.Secure.putString(
+                    appContext.getContentResolver(),
+                    android.provider.Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+                    "com.tv.agent/.AgentService");
+            android.provider.Settings.Secure.putInt(
+                    appContext.getContentResolver(),
+                    android.provider.Settings.Secure.ACCESSIBILITY_ENABLED, 1);
+            for (int i = 0; i < 10; i++) {
+                Thread.sleep(300);
+                if (AgentService.instance != null) return null;
+            }
+        } catch (SecurityException se) {
+            return "无障碍被系统关闭且无法自愈:请先在电脑执行 adb shell pm grant com.tv.agent android.permission.WRITE_SECURE_SETTINGS";
+        } catch (Throwable t) {
+            return "无障碍自愈失败:" + msgOf(t);
+        }
+        return "无障碍服务未能恢复,请打开电视上的「电视Agent」应用,或重新在 设置→无障碍 里启用";
+    }
+
     private final Object opLock = new Object();
     /** 搜片等长流程串行锁(一次只跑一个长流程) */
     private final Object searchLock = new Object();
@@ -529,6 +553,8 @@ public class HttpServerCore {
     /** POST /api/tap {x,y}:轻点语义 = 容器点击(实测影视仓卡片唯一有效;
      *  合成触摸对 TV 应用卡片无效,已废弃,swipe 手势仍走合成触摸) */
     private void handleTap(JSONObject req, OutputStream out) throws Exception {
+        String heal = ensureAccessibility();
+        if (heal != null) throw new IllegalStateException(heal);
         JSONObject blocked = xiaoiBlocked();
         if (blocked != null) { respond(out, 200, blocked.toString()); return; }
         AgentService a = AgentService.instance;
@@ -911,6 +937,8 @@ public class HttpServerCore {
      * 任一步失败返回 {ok:false,error:"没找到搜索入口",steps,screen}。
      */
     private JSONObject doSearch(AppRec app, String query, boolean autoplay) throws Exception {
+        String heal = ensureAccessibility();
+        if (heal != null) throw new IllegalStateException(heal);
         JSONObject r = new JSONObject();
         JSONArray steps = new JSONArray();
         r.put("steps", steps);
