@@ -1,0 +1,10 @@
+build/
+*.apk
+!apps.example.json
+apps.json
+key.txt
+*.log
+*.png
+*.ab
+*.jks
+keystore/
