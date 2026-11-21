@@ -1,4 +1,4 @@
 [
-  {"name": "示例视频App", "pkg": "com.example.video", "search": "搜索", "submit": "搜索"},
-  {"name": "示例网盘App", "pkg": "com.example.disk", "search": "搜索", "submit": "搜索"}
+  {"name": "示例视频App", "pkg": "com.example.video", "search": "搜索", "submit": "搜索", "homeMark": "主页"},
+  {"name": "示例网盘App", "pkg": "com.example.disk", "search": "搜索", "submit": "搜索", "homeMark": ""}
 ]

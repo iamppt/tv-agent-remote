@@ -63,7 +63,7 @@ cd phone && bash build.sh     # 产出 build/out/tvremote.apk
 
 | 文件 | 说明 |
 |---|---|
-| `agent/assets/apps.json` | 你电视上装的应用列表(name/pkg/搜索入口文字/提交按钮文字),从 `apps.example.json` 复制修改 |
+| `agent/assets/apps.json` | 你电视上装的应用列表(name/pkg/搜索入口文字/提交按钮文字/homeMark=首页标志文字,用于重搜前自动退回首页),从 `apps.example.json` 复制修改 |
 | `agent/assets/key.txt` | LLM API 密钥(构建时生成,不进 git)。语音模式用支持音频输入的 OpenAI 兼容端点,文字模式用文本模型,端点/模型名在 `HttpService.java` 顶部常量里改 |
 | `phone/.../MainActivity.java` | `AGENT_URL` 改成你电视的局域网 IP |
 
