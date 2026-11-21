@@ -10,6 +10,7 @@
  *   · setTextIntoField:找 EditText 灌字并回读核对,失败重试一次
  *   · screenTexts:按位置排序收集当前屏幕可见文字,给手机端展示
  *   · topWindowPackage:最上层应用窗口包名,供 HttpService 的小爱互斥守卫使用
+ *   · flashMarker:SYSTEM_ALERT_WINDOW 悬浮小圆点,动作起止点闪现 250ms(真指针反馈)
  *
  * 节点遍历统一走 dfs():限深度/限数量 + seen 集合防环,全程判空。
  * AccessibilityNodeInfo#recycle 在 API33+ 已废弃,直接用即可。
@@ -18,10 +19,19 @@ package com.tv.agent;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.content.Context;
 import android.graphics.Path;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -44,6 +54,13 @@ public class AgentService extends AccessibilityService {
     private static final int MAX_NODES = 3000;
     private static final int MAX_DEPTH = 50;
 
+    /** 真指针反馈:悬浮小圆点(需 SYSTEM_ALERT_WINDOW,真机用 adb appops 授权) */
+    private View markerView;
+    private WindowManager.LayoutParams markerLp;
+    /** 悬浮点统一在主线程加/挪/移(worker 线程没有 Looper,不能直接 addView) */
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private Runnable markerHide;
+
     // ------------------------------------------------ 生命周期
 
     @Override
@@ -56,6 +73,10 @@ public class AgentService extends AccessibilityService {
     @Override
     public void onDestroy() {
         instance = null;
+        if (markerHide != null) uiHandler.removeCallbacks(markerHide);
+        uiHandler.post(new Runnable() {
+            @Override public void run() { hideMarker(); }
+        });
         super.onDestroy();
     }
 
@@ -83,9 +104,10 @@ public class AgentService extends AccessibilityService {
 
     // ------------------------------------------------ 合成触摸
 
-    /** 单点轻触,按下 50ms */
+    /** 单点轻触,按下 50ms;动作前在起点闪现指针小圆点 */
     public boolean tap(int x, int y) {
         try {
+            flashMarker(x, y);
             Path p = new Path();
             p.moveTo(x, y);
             GestureDescription.Builder b = new GestureDescription.Builder();
@@ -97,19 +119,90 @@ public class AgentService extends AccessibilityService {
         }
     }
 
-    /** 从 (x1,y1) 滑到 (x2,y2),时长 ms */
-    public boolean swipe(int x1, int y1, int x2, int y2, long ms) {
+    /** 从 (x1,y1) 滑到 (x2,y2),时长 ms;起点先闪一次,手势结束在终点再闪一次 */
+    public boolean swipe(int x1, int y1, final int x2, final int y2, long ms) {
         try {
+            flashMarker(x1, y1);
             Path p = new Path();
             p.moveTo(x1, y1);
             p.lineTo(x2, y2);
             GestureDescription.Builder b = new GestureDescription.Builder();
             b.addStroke(new GestureDescription.StrokeDescription(p, 0, Math.max(10, ms)));
-            return dispatchGesture(b.build(), null, null);
+            GestureResultCallback cb = new GestureResultCallback() {
+                @Override public void onCompleted(GestureDescription g) { flashMarker(x2, y2); }
+                @Override public void onCancelled(GestureDescription g) { flashMarker(x2, y2); }
+            };
+            boolean ok = dispatchGesture(b.build(), cb, null);
+            if (!ok) flashMarker(x2, y2);
+            return ok;
         } catch (Throwable t) {
             Log.w(TAG, "swipe 失败", t);
             return false;
         }
+    }
+
+    // ------------------------------------------------ 真指针反馈(悬浮小圆点)
+
+    /**
+     * 在屏幕 (x,y) 闪现一个红色半透明小圆点(直径约 28px),250ms 后自动消失。
+     * Type_APPLICATION_OVERLAY 悬浮窗,需 SYSTEM_ALERT_WINDOW 权限(真机 adb appops 授权)。
+     * 连续调用复用同一个 View 只改位置,避免闪烁堆积;
+     * 未授权/异常时静默失败(只打日志),绝不影响 tap/swipe 动作本体。
+     */
+    public void flashMarker(int x, int y) {
+        if (Build.VERSION.SDK_INT < 26) return;   // TYPE_APPLICATION_OVERLAY 需要 API 26
+        final int fx = x, fy = y;
+        uiHandler.post(new Runnable() {
+            @Override public void run() { showMarker(fx, fy); }
+        });
+    }
+
+    /** 主线程执行:首次创建悬浮点,之后只 updateViewLayout 挪位置;每次重置 250ms 消失计时 */
+    private void showMarker(int x, int y) {
+        final int SIZE = 28;
+        try {
+            WindowManager wm = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) return;
+            if (markerView == null) {
+                GradientDrawable dot = new GradientDrawable();
+                dot.setShape(GradientDrawable.OVAL);
+                dot.setColor(0x80FF3B30);   // 红色半透明
+                markerView = new View(this);
+                markerView.setBackground(dot);
+                markerLp = new WindowManager.LayoutParams(
+                        SIZE, SIZE,
+                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                                | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                        PixelFormat.TRANSLUCENT);
+                markerLp.gravity = Gravity.TOP | Gravity.LEFT;
+            }
+            markerLp.x = x - SIZE / 2;
+            markerLp.y = y - SIZE / 2;
+            if (markerView.getParent() == null) {
+                wm.addView(markerView, markerLp);
+            } else {
+                wm.updateViewLayout(markerView, markerLp);
+            }
+            if (markerHide != null) uiHandler.removeCallbacks(markerHide);
+            markerHide = new Runnable() {
+                @Override public void run() { hideMarker(); }
+            };
+            uiHandler.postDelayed(markerHide, 250);
+        } catch (Throwable t) {
+            Log.w(TAG, "flashMarker 失败(悬浮窗未授权?):" + t.getMessage());
+        }
+    }
+
+    /** 移除悬浮点(须在主线程调) */
+    private void hideMarker() {
+        try {
+            if (markerView != null && markerView.getParent() != null) {
+                Object svc = getSystemService(Context.WINDOW_SERVICE);
+                if (svc instanceof WindowManager) ((WindowManager) svc).removeView(markerView);
+            }
+        } catch (Throwable ignored) { }
     }
 
     // ------------------------------------------------ 窗口 / 包名

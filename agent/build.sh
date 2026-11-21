@@ -16,14 +16,14 @@
 set -e
 cd "$(dirname "$0")"
 
-TC="${TV_AGENT_TOOLCHAIN:-../toolchain}"                                   # <TOOLCHAIN_DIR>:JDK17+build-tools34+platform34
-CRED="${TV_AGENT_CRED:-credentials.yaml}"                                 # <KEY_FILE>:本地凭据文件(不入 git)
+TC="${TV_AGENT_TOOLCHAIN:-../toolchain}"      # <TOOLCHAIN_DIR>
+CRED="${TV_AGENT_CRED:-credentials.yaml}"               # <KEY_FILE>
 JDK="$TC/jdk/jdk-17.0.2"
 BT="$TC/bt/android-14"
 PLAT="$TC/plat/android-34/android.jar"
 APP=app
 OUT=build/out
-KS="${TV_AGENT_KS:-build/keys/agent.jks}"                                 # <KEYSTORE>
+KS="${TV_AGENT_KS:-build/keys/agent.jks}"     # <KEYSTORE>
 PASS=agent12345
 
 rm -rf "$OUT"

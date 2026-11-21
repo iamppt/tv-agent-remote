@@ -17,11 +17,14 @@
  *       POST /api/launch  → 打开应用(doLaunch 内守卫)
  *       POST /api/search  → 完整搜片流程(不盲按返回;doSearch 内守卫)
  *       POST /api/asr     → WAV 语音 → 硅基流动 Qwen3-Omni → 指令 JSON → 执行
- *       POST /api/textcmd → 文字指令 → 魔搭 Qwen3.5 → 同一套解析与执行
+ *       POST /api/textcmd → 文字指令 → 魔搭文本模型(设置页可选)→ 同一套解析与执行
  *       POST /api/exec    → 手动执行意图(语音降级通道,支持 {app,action,query} 或 {corrected})
  *       POST /api/player  → 播放控制:center/forward/backward/fullscreen/quality/pick
  *   · 应用配置外置:assets/apps.json(构建时由 apps.example.json 生成,不进 git),
+ *     格式兼容两种:旧纯数组 [{name,pkg,...}] 或新 {"apps":[...],"specials":[...]};
  *     未配置时 /api/apps 返回空数组、/api/search|launch 报「apps.json 未配置」
+ *   · 特例流程:apps.json 顶层 "specials":[{trigger,app,entry,match}],语音/文字指令的
+ *     query 命中某条 trigger 时优先走 doSpecial(如「宝宝巴士」直达历史并播放)
  *   · 意图解析提示词按 apps.json 的应用名动态生成(getIntentPrompt)
  *   · 小爱互斥守卫 isXiaoAiOnTop():所有会动电视界面的操作前检查最上层窗口包名
  *     (含 voiceassist / aiassistant / miai 即视为小爱),命中则返回
@@ -70,13 +73,20 @@ public class HttpService extends Service {
     private static final String SF_URL   = "https://api.siliconflow.cn/v1/chat/completions";
     private static final String SF_MODEL = "Qwen/Qwen3-Omni-30B-A3B-Instruct";
     private static final String MS_URL   = "https://api-inference.modelscope.cn/v1/chat/completions";
-    private static final String MS_MODEL = "Qwen/Qwen3.5-35B-A3B";
+    private static final String TEXT_MODEL_DEFAULT = "Qwen/Qwen3.8-Flash-Next";
+    private static final String[] TEXT_MODEL_ALLOWED = {
+            "Qwen/Qwen3.8-Flash-Next",
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "Qwen/Qwen3.5-35B-A3B"
+    };
 
     private volatile boolean running = false;
     private ServerSocket serverSocket;
 
     /** 应用配置缓存:启动/首用时从 assets/apps.json 读一次 */
     private volatile List<AppRec> appList;
+    /** 特例规则缓存:与 appList 同步加载 */
+    private volatile List<SpecialRec> specialList;
 
     /** 短操作(点击/滑动/输入等)统一用这把锁保序 */
     private final Object opLock = new Object();
@@ -92,6 +102,17 @@ public class HttpService extends Service {
             this.search = search;
             this.submit = submit;
             this.homeMark = homeMark;
+        }
+    }
+
+    /** 一条特例规则:trigger 命中关键词 / app 目标应用名 / entry 应用内入口文字 / match 要点的条目关键词 */
+    private static class SpecialRec {
+        final String trigger, app, entry, match;
+        SpecialRec(String trigger, String app, String entry, String match) {
+            this.trigger = trigger;
+            this.app = app;
+            this.entry = entry;
+            this.match = match;
         }
     }
 
@@ -181,8 +202,9 @@ public class HttpService extends Service {
     // ------------------------------------------------ 应用配置(assets/apps.json)
 
     /**
-     * 读 assets/apps.json:格式 [{"name":"显示名","pkg":"包名",
-     * "search":"搜索入口文字","submit":"搜索按钮文字"}]。
+     * 读 assets/apps.json,兼容两种格式:
+     *   旧:纯数组 [{"name":"显示名","pkg":"包名","search":"搜索入口","submit":"提交按钮"}]
+     *   新:{"apps":[...同上...],"specials":[{"trigger","app","entry","match"}]}
      * 文件缺失/为空/坏 JSON → 空表(启动时也调一次,失败只警告不挡服务)。
      */
     private List<AppRec> getAppList() {
@@ -191,12 +213,22 @@ public class HttpService extends Service {
         synchronized (searchLock) {
             if (appList != null) return appList;
             List<AppRec> list = new ArrayList<>();
+            List<SpecialRec> specials = new ArrayList<>();
             InputStream is = null;
             try {
                 is = getAssets().open("apps.json");
-                JSONArray arr = new JSONArray(new String(readAllBytes(is), StandardCharsets.UTF_8));
-                for (int i = 0; i < arr.length(); i++) {
-                    JSONObject o = arr.getJSONObject(i);
+                String raw = new String(readAllBytes(is), StandardCharsets.UTF_8).trim();
+                JSONArray appArr, spArr = null;
+                if (raw.startsWith("[")) {
+                    appArr = new JSONArray(raw);   // 旧格式:纯数组,无特例
+                } else {
+                    JSONObject root = new JSONObject(raw);
+                    appArr = root.optJSONArray("apps");
+                    if (appArr == null) appArr = new JSONArray();
+                    spArr = root.optJSONArray("specials");
+                }
+                for (int i = 0; i < appArr.length(); i++) {
+                    JSONObject o = appArr.getJSONObject(i);
                     String name = o.optString("name", "").trim();
                     String pkg = o.optString("pkg", "").trim();
                     if (name.isEmpty() || pkg.isEmpty()) continue;
@@ -205,14 +237,38 @@ public class HttpService extends Service {
                             o.optString("submit", "搜索").trim(),
                             o.optString("homeMark", "").trim()));
                 }
+                if (spArr != null) {
+                    for (int i = 0; i < spArr.length(); i++) {
+                        JSONObject o = spArr.getJSONObject(i);
+                        String trigger = o.optString("trigger", "").trim();
+                        String app = o.optString("app", "").trim();
+                        if (trigger.isEmpty() || app.isEmpty()) continue;
+                        specials.add(new SpecialRec(trigger, app,
+                                o.optString("entry", "").trim(),
+                                o.optString("match", "").trim()));
+                    }
+                }
             } catch (Throwable t) {
                 Log.w(TAG, "apps.json 读取失败(视为未配置):" + msgOf(t));
             } finally {
                 try { if (is != null) is.close(); } catch (IOException ignored) { }
             }
             appList = list;
+            specialList = specials;
             return list;
         }
+    }
+
+    /** query 包含某条特例 trigger(包含匹配)时返回该条;否则 null(含无 query) */
+    private SpecialRec matchSpecial(String query) {
+        getAppList();   // 确保配置已加载
+        if (query == null || query.isEmpty()) return null;
+        List<SpecialRec> ss = specialList;
+        if (ss == null) return null;
+        for (SpecialRec s : ss) {
+            if (s.trigger != null && !s.trigger.isEmpty() && query.contains(s.trigger)) return s;
+        }
+        return null;
     }
 
     /** 启动时预热应用表 */
@@ -604,14 +660,15 @@ public class HttpService extends Service {
         respond(out, 200, doLaunch(app).toString());
     }
 
-    /** POST /api/search {app,query}:完整搜片长流程 */
+    /** POST /api/search {app,query,autoplay?}:完整搜片长流程;autoplay 缺省 true(页面设置可关) */
     private void handleSearch(JSONObject req, OutputStream out) throws Exception {
         String name = req.optString("app", "");
         String query = req.optString("query", "").trim();
         if (query.isEmpty()) throw new IllegalArgumentException("缺少 query");
         AppRec app = resolveApp(name);
         if (app == null) throw new IllegalArgumentException(appsTableError(name));
-        respond(out, 200, doSearch(app, query).toString());
+        boolean autoplay = req.optBoolean("autoplay", true);
+        respond(out, 200, doSearch(app, query, autoplay).toString());
     }
 
     /** POST /api/asr {audio_base64,mime}:WAV → 硅基流动 Omni → 意图 → 执行 */
@@ -663,9 +720,14 @@ public class HttpService extends Service {
             if (key.isEmpty()) {
                 throw new IllegalStateException("未配置 MODELSCOPE_API_KEY(构建时注入 assets/key.txt)");
             }
+            String model = req.optString("model", TEXT_MODEL_DEFAULT).trim();
+            boolean allowed = false;
+            for (String m : TEXT_MODEL_ALLOWED) if (m.equals(model)) { allowed = true; break; }
+            if (!allowed) model = TEXT_MODEL_DEFAULT;
             String user = "语音转写文本:" + text + "\n请输出指令JSON。";
-            JSONObject intent = parseIntoIntent(callChat(MS_URL, key, MS_MODEL, user, 40000));
+            JSONObject intent = parseIntoIntent(callChat(MS_URL, key, model, user, 40000));
             r.put("result", intent);
+            r.put("model", model);
             executeIntent(r, intent);   // 与语音段共用同一套执行逻辑
             r.put("ok", true);
             r.put("path", "textcmd");
@@ -701,7 +763,7 @@ public class HttpService extends Service {
                 if (key.isEmpty()) {
                     throw new IllegalStateException("未配置 MODELSCOPE_API_KEY(构建时注入 assets/key.txt)");
                 }
-                JSONObject intent = parseIntoIntent(callChat(MS_URL, key, MS_MODEL,
+                JSONObject intent = parseIntoIntent(callChat(MS_URL, key, TEXT_MODEL_DEFAULT,
                         "语音转写文本:" + req.optString("corrected", "").trim() + "\n请输出指令JSON。", 40000));
                 r.put("result", intent);
                 executeIntent(r, intent);
@@ -827,6 +889,11 @@ public class HttpService extends Service {
         return r;
     }
 
+    /** 兼容旧调用(语音/文字指令路径):自动播放默认开 */
+    private JSONObject doSearch(AppRec app, String query) throws Exception {
+        return doSearch(app, query, true);
+    }
+
     /**
      * 完整搜片流程(不盲按返回键,小爱浮层已在守卫处拦截):
      *   a. 守卫 + 打开应用(NEW_TASK),sleep 2s 等冷启动
@@ -836,9 +903,10 @@ public class HttpService extends Service {
      *   c. 轮询最多 10s 等 setTextIntoField(query) 成功(搜索框加载慢的应用靠轮询兜住)
      *   d. clickText(提交按钮文字,来自 apps.json 的 submit 字段),sleep 4s 等结果
      *   e. 返回 screenTexts(10)
+     *   f. autoplay=true 时接自动播放链(见 autoplayFirst,失败不影响搜片结果)
      * 任一步失败返回 {ok:false,error:"没找到搜索入口",steps,screen}。
      */
-    private JSONObject doSearch(AppRec app, String query) throws Exception {
+    private JSONObject doSearch(AppRec app, String query, boolean autoplay) throws Exception {
         JSONObject r = new JSONObject();
         JSONArray steps = new JSONArray();
         r.put("steps", steps);
@@ -923,6 +991,9 @@ public class HttpService extends Service {
                 r.put("ok", true);
                 r.put("message", "已在" + app.name + "搜索「" + query + "」");
                 r.put("screen", screenArr(a, 10));
+
+                // f. 自动播放(可选):失败只追加 steps,不推翻搜片本身的 ok
+                if (autoplay) autoplayFirst(r, a, steps, query);
                 return r;
             } catch (Throwable t) {
                 r.put("ok", false);
@@ -933,12 +1004,186 @@ public class HttpService extends Service {
         }
     }
 
+    // ------------------------------------------------ 自动播放链(搜片成功后可选)
+
+    /**
+     * 搜片成功后的自动播放链(通用动作,不做更多猜测):
+     *   ① sleep 3s 等结果屏稳定
+     *   ② 点开第一个结果卡片:先 clickText 含「┃」的文字(线路卡片特征),
+     *      失败则取 screenTexts 里第一条不含「全部显示」「搜索」「query」的条目 tryClick
+     *   ③ sleep 4s 等进详情页
+     *   ④ clickText("播放");找不到节点就 tap 屏幕中心偏下 (960,700)
+     *   ⑤ sleep 5s 等起播
+     *   ⑥ 全屏:clickText("全屏"),失败 tap(1870,1030)
+     * 任何一步失败立即停止,已走步骤留在 steps,并回当前 screen;不报错不崩溃。
+     */
+    private void autoplayFirst(JSONObject r, AgentService a, JSONArray steps, String query) {
+        try {
+            // ① 等结果屏稳定
+            sleepQuiet(3000);
+            // ② 点开第一个结果卡片
+            boolean opened = a.clickText("┃");
+            if (opened) {
+                steps.put("自动播放:点开第一个线路卡片");
+            } else {
+                String pick = null;
+                List<String> texts = a.screenTexts(20);
+                for (String t : texts) {
+                    if (t == null || t.isEmpty()) continue;
+                    if (t.contains("全部显示") || t.contains("搜索")) continue;
+                    if (query != null && !query.isEmpty() && t.contains(query)) continue;   // 跳过搜索框里的片名
+                    pick = t;
+                    break;
+                }
+                if (pick == null || !a.clickText(pick)) {
+                    steps.put("自动播放中断:没找到可点的结果卡片");
+                    r.put("screen", screenArr(a, 10));
+                    return;
+                }
+                steps.put("自动播放:点开「" + truncate(pick, 12) + "」");
+            }
+            // ③ 等进详情页
+            sleepQuiet(4000);
+            // ④ 点播放,找不到节点改点屏幕中心偏下
+            if (a.clickText("播放")) {
+                steps.put("自动播放:点「播放」");
+            } else {
+                a.tap(960, 700);
+                steps.put("自动播放:点「播放」失败,改点屏幕中央偏下");
+            }
+            // ⑤ 等起播
+            sleepQuiet(5000);
+            // ⑥ 全屏
+            if (a.clickText("全屏")) {
+                steps.put("自动播放:全屏");
+            } else {
+                a.tap(1870, 1030);
+                steps.put("自动播放:全屏按钮没找到,点右下角");
+            }
+            r.put("screen", screenArr(a, 10));
+        } catch (Throwable t) {
+            try {
+                steps.put("自动播放中断:" + msgOf(t));
+                r.put("screen", screenArr(a, 10));
+            } catch (Throwable ignored) { }
+        }
+    }
+
+    // ------------------------------------------------ 特例流程(宝宝巴士等,规则在 apps.json specials)
+
+    /**
+     * 特例流程:小爱守卫 → 打开 app → sleep 4s → 轮询点入口(entry,10s)→ sleep 2s
+     * → 轮询点含 match 的条目(10s)→ sleep 4s → 屏上有「播放」就点 → sleep 5s → 全屏
+     * (同自动播放链:找不到「全屏」按钮点右下角)。
+     * 任一步失败返回 {ok:false,error,steps,screen},不崩溃。
+     */
+    private JSONObject doSpecial(SpecialRec sp) throws Exception {
+        JSONObject r = new JSONObject();
+        JSONArray steps = new JSONArray();
+        r.put("steps", steps);
+        r.put("special", sp.trigger);
+        AgentService a = AgentService.instance;
+        if (a == null) {
+            r.put("ok", false);
+            r.put("error", "电视上未开启无障碍服务");
+            return r;
+        }
+        AppRec app = resolveApp(sp.app);
+        if (app == null) {
+            r.put("ok", false);
+            r.put("error", "特例「" + sp.trigger + "」:" + appsTableError(sp.app));
+            return r;
+        }
+        synchronized (searchLock) {   // 长流程串行,与搜片互斥
+            JSONObject blocked = xiaoiBlocked();
+            if (blocked != null) return blocked;
+            try {
+                PackageManager pm = getPackageManager();
+                Intent it = pm.getLaunchIntentForPackage(app.pkg);
+                if (it == null) {
+                    r.put("ok", false);
+                    r.put("error", app.name + " 未安装");
+                    return r;
+                }
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                synchronized (opLock) {
+                    startActivity(it);
+                }
+                steps.put("打开 " + app.name);
+                sleepQuiet(4000);
+
+                // 轮询点应用内入口(如「历史」),最多 10s
+                boolean entered = false;
+                long deadline = System.currentTimeMillis() + 10000;
+                while (System.currentTimeMillis() < deadline) {
+                    if (sp.entry.isEmpty() || a.clickText(sp.entry)) { entered = true; break; }
+                    sleepQuiet(1000);
+                }
+                if (!entered) {
+                    r.put("ok", false);
+                    r.put("error", "没找到入口「" + sp.entry + "」");
+                    r.put("screen", screenArr(a, 10));
+                    return r;
+                }
+                steps.put("点开「" + sp.entry + "」");
+                sleepQuiet(2000);
+
+                // 轮询点含 match 的第一个条目,最多 10s
+                boolean picked = false;
+                deadline = System.currentTimeMillis() + 10000;
+                while (System.currentTimeMillis() < deadline) {
+                    if (a.clickText(sp.match)) { picked = true; break; }
+                    sleepQuiet(1000);
+                }
+                if (!picked) {
+                    r.put("ok", false);
+                    r.put("error", "没找到含「" + sp.match + "」的条目");
+                    r.put("screen", screenArr(a, 10));
+                    return r;
+                }
+                steps.put("点开含「" + sp.match + "」的条目");
+                sleepQuiet(4000);
+
+                // 屏上有「播放」就点,没有则跳过
+                boolean hasPlay = false;
+                for (String t : a.screenTexts(15)) {
+                    if (t != null && t.contains("播放")) { hasPlay = true; break; }
+                }
+                if (hasPlay) {
+                    a.clickText("播放");
+                    steps.put("点「播放」");
+                } else {
+                    steps.put("屏上无「播放」,跳过");
+                }
+                sleepQuiet(5000);
+
+                // 全屏:找不到按钮点右下角
+                if (a.clickText("全屏")) {
+                    steps.put("全屏");
+                } else {
+                    a.tap(1870, 1030);
+                    steps.put("全屏按钮没找到,点右下角");
+                }
+                r.put("ok", true);
+                r.put("message", "已通过特例「" + sp.trigger + "」打开 " + app.name);
+                r.put("screen", screenArr(a, 10));
+                return r;
+            } catch (Throwable t) {
+                r.put("ok", false);
+                r.put("error", "特例执行异常:" + msgOf(t));
+                try { r.put("screen", screenArr(a, 10)); } catch (Throwable ignored) { }
+                return r;
+            }
+        }
+    }
+
     // ------------------------------------------------ 意图解析与执行(语音/文字共用)
 
     /**
      * 公共执行:把 {corrected,app,action,query} 变成动作。
+     * 特例优先:action=search/launch 且 query 含某条 specials.trigger → doSpecial;
      * search(且 query 非空、app 在表内)→ doSearch;launch(app 在表内)→ doLaunch;
-     * 其余不执行,message=「识别到:...」。小爱守卫由 doSearch/doLaunch 内部完成,
+     * 其余不执行,message=「识别到:...」。小爱守卫由 doSearch/doLaunch/doSpecial 内部完成,
      * blocked 字段原样透传给前端。
      */
     private void executeIntent(JSONObject r, JSONObject intent) throws Exception {
@@ -946,6 +1191,22 @@ public class HttpService extends Service {
         String app = intent.optString("app", "");
         String query = intent.optString("query", "").trim();
         String corrected = intent.optString("corrected", "");
+
+        // 特例优先于普通搜片:search/launch 且 query 命中某条 trigger(如「宝宝巴士」)
+        if (("search".equals(action) || "launch".equals(action)) && !query.isEmpty()) {
+            SpecialRec sp = matchSpecial(query);
+            if (sp != null) {
+                JSONObject sr = doSpecial(sp);
+                if ("xiaoi".equals(sr.optString("blocked", ""))) r.put("blocked", "xiaoi");
+                r.put("executed", sr.optBoolean("ok", false));
+                r.put("message", sr.optBoolean("ok", false)
+                        ? sr.optString("message", "")
+                        : sr.optString("error", "特例执行失败"));
+                if (sr.has("steps")) r.put("steps", sr.get("steps"));
+                if (sr.has("screen")) r.put("screen", sr.get("screen"));
+                return;
+            }
+        }
 
         if ("search".equals(action) && !query.isEmpty()) {
             AppRec rec = resolveApp(app);

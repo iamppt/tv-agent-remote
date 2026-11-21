@@ -1,16 +1,19 @@
 <!DOCTYPE html>
 <!--
-  电视Agent·直连版 遥控页(手机浏览器打开 http://<电视IP>:9999/)
+  电视Agent·直连版 遥控页(手机浏览器 / 手机壳 app 打开 http://<电视IP>:9999/)
 
+  · 四个分页(底部 Tab 单页切换,localStorage tvtab 记住上次页):
+      【触摸】指针触控板 + 边缘小圆钮(返回/主页/音量±)+ 播放控制排 + 键盘输入
+      【语音】大麦克风按钮按住说话:壳 app 走 window.AndroidMic(同步 start/stop,
+              stop 返回 16k 单声道 WAV base64);浏览器走 getUserMedia(PCM 16k WAV)
+              → POST /api/asr {audio_base64,mime}(硅基流动 Qwen3-Omni)
+      【文字】文字指令区(输入+发送,📝=Qwen3.5 解析 / ⚡=直发不解析 两小钮)
+            + 搜片区(应用下拉+片名+搜索按钮+「搜完自动播放」开关 → /api/search autoplay)
+      【设置】灵敏度滑杆 / 自动播放开关(localStorage tvautoplay,默认开)
+            / 服务状态卡(a11y/topPkg/屏幕文字,带「刷新状态」)/ 模式说明
   · 触控板 = 指针模式:维护虚拟光标(1920×1080),慢滑移动、轻点确认、
     双指滑动 = 返回、快滑(单步 >120px)= 大步长翻页
-  · 顶栏小圆钮:返回 / 主页 / 音量±(显示 from→to)
-  · 播放控制:⏪快退 ☰唤出菜单 ⏩快进 ⛶全屏 清晰度(选项可点,10 秒自动隐藏)
-  · 指令三模式(存 localStorage tvmode2):
-      🎤 语音 = 录音(PCM 16k WAV)→ /api/asr(硅基流动 Qwen3-Omni)
-      📝 文字 = 输入整句指令 → /api/textcmd(魔搭 Qwen3.5)
-      ⚡ 直发 = 输入片名 → /api/search 直接搜,不经过模型
-  · 键盘输入:「填入」/「填入并搜索」→ /api/text(需电视当前界面有输入框)
+  · 语音/文字两页共用结果展示组件(.resultbox,内容同步写两份)
   · 状态条:10s 轮询 /api/status;a11y=false 红点提示未开无障碍
   · 收到 blocked:"xiaoi" 一律红 toast:小爱正在使用,请先关闭小爱再操作电视
 -->
@@ -51,19 +54,27 @@
   .dot.on{background:var(--ok);box-shadow:0 0 6px var(--ok)}
   .dot.off{background:var(--err);box-shadow:0 0 6px var(--err)}
 
-  /* ===== 上部 55% 触控区 ===== */
-  #topwrap{
-    flex:none;height:55%;min-height:260px;
-    display:flex;flex-direction:column;padding:4px 14px 6px;
-    max-width:520px;width:100%;margin:0 auto;
+  /* ===== 分页容器 + 底部 Tab 栏 ===== */
+  #pages{
+    flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+    width:100%;max-width:520px;margin:0 auto;
+    padding:4px 14px calc(12px + env(safe-area-inset-bottom));
+    user-select:text;-webkit-user-select:text;
   }
-  #padbar{
-    flex:none;display:flex;align-items:center;gap:8px;padding:2px 2px 8px;
+  #tabbar{
+    flex:none;display:flex;border-top:1px solid var(--line);background:var(--card);
+    padding-bottom:env(safe-area-inset-bottom);
   }
+  #tabbar button{
+    flex:1;background:none;border:none;color:var(--muted);font-family:inherit;
+    font-size:10px;padding:6px 0 7px;display:flex;flex-direction:column;align-items:center;gap:2px;
+  }
+  #tabbar button .ico{font-size:19px;line-height:1.2}
+  #tabbar button.sel{color:#9cc3f7}
+
+  /* ===== 触摸页:触控板 ===== */
+  #padbar{display:flex;align-items:center;gap:8px;padding:4px 2px 8px}
   #padbar .t{font-size:12px;color:var(--muted)}
-  #senswrap{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted)}
-  #sens{width:80px;accent-color:var(--accent)}
-  #sensval{min-width:26px;text-align:right;color:var(--text)}
   .padkeys{margin-left:auto;display:flex;gap:8px}
   .rnd{
     width:36px;height:36px;border-radius:50%;border:1px solid var(--line);
@@ -72,9 +83,8 @@
   }
   .rnd:active{background:var(--card2);transform:scale(.94)}
   .rnd.big{font-size:14px}
-
   #pad{
-    flex:1;border:1px solid var(--line);border-radius:18px;
+    height:44vh;min-height:240px;border:1px solid var(--line);border-radius:18px;
     background:linear-gradient(160deg,var(--card) 0%,var(--card2) 100%);
     position:relative;overflow:hidden;
     touch-action:none;
@@ -91,13 +101,7 @@
   #pad .active-ring{position:absolute;inset:0;border:2px solid var(--accent);border-radius:18px;opacity:0;pointer-events:none;transition:opacity .15s}
   #pad.touching .active-ring{opacity:.6}
 
-  /* ===== 下部 ===== */
-  #bottom{
-    flex:1;min-height:240px;overflow-y:auto;-webkit-overflow-scrolling:touch;
-    padding:6px 14px calc(14px + env(safe-area-inset-bottom));
-    max-width:520px;width:100%;margin:0 auto;user-select:text;-webkit-user-select:text;
-  }
-  .sec-title{font-size:11px;color:var(--hint);margin:10px 2px 6px;letter-spacing:1px;display:flex;align-items:center;gap:8px}
+  .sec-title{font-size:11px;color:var(--hint);margin:14px 2px 6px;letter-spacing:1px;display:flex;align-items:center;gap:8px}
 
   /* 播放控制 */
   #playerbar{display:flex;gap:8px;flex-wrap:wrap}
@@ -114,27 +118,16 @@
   }
   .qbtn:active{transform:scale(.95)}
 
-  /* 指令模式按钮 */
+  /* 指令模式小钮 / 通用小药丸钮 */
   .modes{display:flex;gap:6px}
-  .modebtn{
+  .pill{
     border:1px solid var(--line);background:var(--card);color:var(--muted);
     font-size:13px;padding:4px 9px;border-radius:999px;font-family:inherit;line-height:1;
   }
-  .modebtn.sel{background:var(--accent-soft);border-color:var(--accent);color:#9cc3f7}
+  .pill.sel{background:var(--accent-soft);border-color:var(--accent);color:#9cc3f7}
   #modehint{color:var(--hint);font-size:10px;margin-left:auto;text-align:right;line-height:1.4}
 
-  /* 语音:按钮居中 */
-  #micwrap{display:flex;flex-direction:column;align-items:center;gap:8px}
-  #micbtn{
-    width:96px;height:96px;border-radius:50%;border:2px solid var(--line);flex:none;
-    background:var(--card);color:var(--text);font-size:34px;font-family:inherit;padding:0;
-    display:flex;align-items:center;justify-content:center;
-  }
-  #micbtn.rec{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1.2s infinite}
-  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}50%{box-shadow:0 0 0 12px rgba(239,68,68,0)}}
-  #micstate{text-align:center;font-size:13px;color:var(--muted);line-height:1.6}
-  #micstate b{color:var(--text);font-weight:500}
-
+  /* 输入行 */
   .row{display:flex;gap:8px}
   input[type=text]{
     flex:1;min-width:0;border:1px solid var(--line);border-radius:10px;
@@ -155,12 +148,45 @@
   .busy{opacity:.5;pointer-events:none}
   .hint{font-size:11px;color:var(--hint);margin-top:5px;line-height:1.5}
 
-  #result{
+  /* 「搜完自动播放」开关 */
+  .switch{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin-left:auto}
+  .switch input{width:18px;height:18px;accent-color:var(--accent);margin:0}
+
+  /* ===== 语音页 ===== */
+  #micwrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:7vh 0 10px}
+  #micbtn{
+    width:96px;height:96px;border-radius:50%;border:2px solid var(--line);flex:none;
+    background:var(--card);color:var(--text);font-size:34px;font-family:inherit;padding:0;
+    display:flex;align-items:center;justify-content:center;
+  }
+  #micbtn.rec{background:var(--err);border-color:var(--err);color:#fff;animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(239,68,68,.5)}50%{box-shadow:0 0 0 12px rgba(239,68,68,0)}}
+  #micstate{text-align:center;font-size:13px;color:var(--muted);line-height:1.6}
+  #micstate b{color:var(--text);font-weight:500}
+  #voicechan{color:var(--hint);font-size:10px;margin-left:auto}
+
+  /* ===== 结果展示组件(语音/文字两页共用内容) ===== */
+  .resultbox{
     margin-top:10px;font-size:12px;line-height:1.7;color:var(--muted);
     background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px;
-    white-space:pre-wrap;word-break:break-all;display:none;max-height:150px;overflow-y:auto;
+    white-space:pre-wrap;word-break:break-all;display:none;max-height:180px;overflow-y:auto;
   }
-  #result.show{display:block}
+  .resultbox.show{display:block}
+
+  /* ===== 设置页 ===== */
+  .setrow{
+    display:flex;align-items:center;gap:10px;font-size:13px;color:var(--muted);
+    background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;
+  }
+  #sens{flex:1;accent-color:var(--accent)}
+  #sensval{min-width:26px;text-align:right;color:var(--text)}
+  .card{
+    background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:10px 12px;font-size:12px;line-height:1.9;color:var(--muted);
+  }
+  .card b{color:var(--text);font-weight:500}
+  #setScreen{margin:6px 0 0;padding-left:16px}
+  #setScreen li{word-break:break-all}
 
   /* ===== toast ===== */
   #toast{
@@ -182,72 +208,146 @@
   <span id="stext">连接中…</span>
 </div>
 
-<!-- 上部:指针触控板 + 小圆钮 -->
-<div id="topwrap">
-  <div id="padbar">
-    <span class="t">指针</span>
-    <span id="senswrap">
-      灵敏度<input type="range" id="sens" min="0.5" max="3.0" step="0.1" value="1.5">
-      <span id="sensval">1.5</span>
-    </span>
-    <div class="padkeys">
-      <button class="rnd" id="kVolDn">−</button>
-      <button class="rnd big" id="kVolUp">＋</button>
-      <button class="rnd big" id="kHome">⌂</button>
-      <button class="rnd" id="kBack">←</button>
+<main id="pages">
+
+  <!-- ===== 【触摸】触控板 + 小圆钮 + 播放控制 + 键盘输入 ===== -->
+  <section id="tab-touch">
+    <div id="padbar">
+      <span class="t">指针</span>
+      <div class="padkeys">
+        <button class="rnd" id="kVolDn">−</button>
+        <button class="rnd big" id="kVolUp">＋</button>
+        <button class="rnd big" id="kHome">⌂</button>
+        <button class="rnd" id="kBack">←</button>
+      </div>
     </div>
-  </div>
-  <div id="pad">
-    <div id="padlabel">慢滑 = 移动指针 / 轻点 = 确认<br>双指滑动 = 返回</div>
-    <div id="padhint">快滑(单步 &gt;120px)= 大步长翻页 · 屏幕坐标 1920×1080</div>
-    <div class="active-ring"></div>
-  </div>
-</div>
+    <div id="pad">
+      <div id="padlabel">慢滑 = 移动指针 / 轻点 = 确认<br>双指滑动 = 返回</div>
+      <div id="padhint">快滑(单步 &gt;120px)= 大步长翻页 · 屏幕坐标 1920×1080</div>
+      <div class="active-ring"></div>
+    </div>
 
-<!-- 下部 -->
-<div id="bottom">
+    <div class="sec-title">播放控制</div>
+    <div id="playerbar">
+      <button class="pbtn" data-p="backward">⏪ 快退</button>
+      <button class="pbtn" data-p="center">☰ 菜单</button>
+      <button class="pbtn" data-p="forward">⏩ 快进</button>
+      <button class="pbtn" data-p="fullscreen">⛶ 全屏</button>
+      <button class="pbtn" data-p="quality">清晰度</button>
+    </div>
+    <div id="qopts"></div>
 
-  <div class="sec-title">播放控制</div>
-  <div id="playerbar">
-    <button class="pbtn" data-p="backward">⏪ 快退</button>
-    <button class="pbtn" data-p="center">☰ 菜单</button>
-    <button class="pbtn" data-p="forward">⏩ 快进</button>
-    <button class="pbtn" data-p="fullscreen">⛶ 全屏</button>
-    <button class="pbtn" data-p="quality">清晰度</button>
-  </div>
-  <div id="qopts"></div>
+    <div class="sec-title">键盘输入</div>
+    <div class="row">
+      <input id="txt" type="text" placeholder="输入文字填到电视" autocomplete="off" autocorrect="off" autocapitalize="off">
+      <button class="act ghost" id="btnTextFill">填入</button>
+      <button class="act" id="btnTextSearch">填入并搜索</button>
+    </div>
+    <div class="hint">先在电视上点开搜索框,然后在手机上打字;长按输入框用输入法自带语音转文字也能填</div>
+  </section>
 
-  <div class="sec-title">
-    <span>语音</span>
-    <span class="modes">
-      <button class="modebtn" data-mode="voice" title="语音模式">🎤</button>
-      <button class="modebtn" data-mode="text" title="文字指令模式">📝</button>
-      <button class="modebtn" data-mode="direct" title="直发模式">⚡</button>
-    </span>
-    <span id="modehint"></span>
-  </div>
-  <div id="micwrap">
-    <button id="micbtn">🎤</button>
-    <div id="micstate">按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span></div>
-  </div>
+  <!-- ===== 【语音】大麦克风 + 结果展示 ===== -->
+  <section id="tab-voice">
+    <div class="sec-title">
+      <span>语音指令</span>
+      <span id="voicechan"></span>
+    </div>
+    <div id="micwrap">
+      <button id="micbtn">🎤</button>
+      <div id="micstate">按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span></div>
+    </div>
+    <div id="resultVoice" class="resultbox"></div>
+  </section>
 
-  <div class="sec-title">键盘输入</div>
-  <div class="row">
-    <input id="txt" type="text" placeholder="输入文字填到电视" autocomplete="off" autocorrect="off" autocapitalize="off">
-    <button class="act ghost" id="btnTextFill">填入</button>
-    <button class="act" id="btnTextSearch">填入并搜索</button>
-  </div>
-  <div class="hint">先在电视上点开搜索框,然后在手机上打字;长按输入框用输入法自带语音转文字也能填</div>
+  <!-- ===== 【文字】文字指令 + 搜片 + 结果展示 ===== -->
+  <section id="tab-text">
+    <div class="sec-title">
+      <span>文字指令</span>
+      <span class="modes">
+        <button class="pill modebtn" data-mode="text" title="文字指令模式">📝</button>
+        <button class="pill modebtn" data-mode="direct" title="直发模式">⚡</button>
+      </span>
+      <span id="modehint"></span>
+    </div>
+    <div class="row">
+      <input id="cmd" type="text" placeholder="整句指令,如:用影视仓搜流浪地球" autocomplete="off" autocorrect="off" autocapitalize="off">
+      <button class="act" id="btnCmd">发送</button>
+    </div>
+    <div class="hint">📝 整句指令走 Qwen3.5 解析 · ⚡ 选好应用直接搜片,不经过模型</div>
 
-  <div class="sec-title">搜片</div>
-  <div class="row">
-    <select id="appsel"><option value="">加载应用…</option></select>
-    <input id="q" type="text" placeholder="片名 / 整句指令" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="search">
-    <button class="act" id="btnGo">搜片</button>
-  </div>
+    <div class="sec-title">
+      <span>搜片</span>
+      <label class="switch">搜完自动播放<input type="checkbox" id="autoplay"></label>
+    </div>
+    <div class="row">
+      <select id="appsel"><option value="">加载应用…</option></select>
+      <input id="q" type="text" placeholder="片名" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="search">
+      <button class="act" id="btnGo">搜片</button>
+    </div>
 
-  <div id="result"></div>
-</div>
+    <div id="resultText" class="resultbox"></div>
+  </section>
+
+  <!-- ===== 【设置】灵敏度 / 自动播放 / 服务状态 / 模式说明 ===== -->
+  <section id="tab-setting">
+    <div class="sec-title">触控</div>
+    <div class="setrow">
+      灵敏度
+      <input type="range" id="sens" min="0.5" max="3.0" step="0.1" value="1.5">
+      <span id="sensval">1.5</span>
+    </div>
+
+    <div class="sec-title">搜片</div>
+    <div class="setrow">
+      搜完自动播放
+      <label class="switch" style="margin-left:auto"><input type="checkbox" id="autoplaySet"></label>
+    </div>
+    <div class="hint">开启后搜片成功会自动点开第一个结果并播放、切全屏(仅对搜片按钮生效;语音/文字指令不受此开关影响)</div>
+
+    <div class="sec-title">
+      <span>服务状态</span>
+      <button class="pill" id="btnRefresh" style="margin-left:auto">刷新状态</button>
+    </div>
+    <div class="card">
+      无障碍:<b id="setA11y">—</b><br>
+      前台包名:<b id="setTop">—</b>
+      <div style="margin-top:4px">屏幕文字(点「刷新状态」拉取):</div>
+      <ul id="setScreen"><li style="color:var(--hint);list-style:none">(未拉取)</li></ul>
+    </div>
+
+    <div class="sec-title">文字模型(📝 模式用)</div>
+    <div class="setrow">
+      <select id="textmodel" style="flex:1">
+        <option value="Qwen/Qwen3.8-Flash-Next">Qwen3.8-Flash-Next(快,推荐)</option>
+        <option value="deepseek-ai/DeepSeek-V4.1-Flash-1017">DeepSeek-V4.1-Flash(最快)</option>
+        <option value="Qwen/Qwen3.5-35B-A3B">Qwen3.5-35B(慢)</option>
+      </select>
+    </div>
+
+    <div class="sec-title">模式说明</div>
+    <div class="card">
+      🎤 语音 = 录音上传,硅基流动 Qwen3-Omni 解析<br>
+      📝 文字 = 整句指令,魔搭 Qwen3.5 解析<br>
+      ⚡ 直发 = 应用+片名直接搜片,不经过模型解析<br>
+      语音优先走手机壳 app 注入的 AndroidMic(16k WAV);浏览器里退回
+      getUserMedia 采集,受限时请用手机壳 app
+    </div>
+
+    <div class="hint" style="margin-top:12px">
+      电视端首次使用:设置 → 无障碍 → 已下载的应用 → 开启「电视Agent」;
+      底部 Tab 切换四页,自动记住上次所在页
+    </div>
+  </section>
+
+</main>
+
+<!-- 底部 Tab 栏 -->
+<nav id="tabbar">
+  <button data-tab="touch"><span class="ico">👆</span><span>触摸</span></button>
+  <button data-tab="voice"><span class="ico">🎤</span><span>语音</span></button>
+  <button data-tab="text"><span class="ico">⌨️</span><span>文字</span></button>
+  <button data-tab="setting"><span class="ico">⚙️</span><span>设置</span></button>
+</nav>
 
 <div id="toast"></div>
 
@@ -280,20 +380,71 @@ async function api(path, body) {
 function isBlocked(r) { return r && r.blocked === 'xiaoi'; }
 function blockedToast() { toast('小爱正在使用,请先关闭小爱再操作电视', true); }
 
-/* ================= 状态轮询(10s) ================= */
+/* ================= 四个分页切换(记住上次 tab) ================= */
+const TABS = ['touch', 'voice', 'text', 'setting'];
+function showTab(name) {
+  if (TABS.indexOf(name) < 0) name = 'touch';
+  TABS.forEach(t => {
+    const el = document.getElementById('tab-' + t);
+    if (el) el.style.display = (t === name) ? '' : 'none';
+  });
+  $$('#tabbar button').forEach(b => b.classList.toggle('sel', b.dataset.tab === name));
+  localStorage.setItem('tvtab', name);
+}
+$$('#tabbar button').forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+/* ================= 状态轮询(10s)+ 设置页状态卡 ================= */
+function paintStatus(s) {
+  const on = s.a11y === true;
+  $('#dot').className = 'dot ' + (on ? 'on' : 'off');
+  let txt = on ? '已连接 · 无障碍开启' : '已连接 · 电视上未开启无障碍(红点即去设置开启)';
+  if (on && s.topPkg) txt += ' · 前台:' + String(s.topPkg).slice(0, 24);
+  $('#stext').textContent = txt;
+  const sa = $('#setA11y'), st = $('#setTop');
+  sa.textContent = on ? '开启' : '未开启';
+  sa.style.color = on ? 'var(--ok)' : 'var(--err)';
+  st.textContent = s.topPkg || '(拿不到)';
+}
+
 async function refreshStatus() {
   try {
-    const s = await api('/api/status');
-    const on = s.a11y === true;
-    $('#dot').className = 'dot ' + (on ? 'on' : 'off');
-    let txt = on ? '已连接 · 无障碍开启' : '已连接 · 电视上未开启无障碍(红点即去设置开启)';
-    if (on && s.topPkg) txt += ' · 前台:' + String(s.topPkg).slice(0, 24);
-    $('#stext').textContent = txt;
+    paintStatus(await api('/api/status'));
   } catch (e) {
     $('#dot').className = 'dot off';
     $('#stext').textContent = '服务未响应(确认手机与电视同一局域网)';
+    const sa = $('#setA11y');
+    sa.textContent = '服务未响应';
+    sa.style.color = 'var(--err)';
+    $('#setTop').textContent = '—';
   }
 }
+
+/* 设置页「刷新状态」:?screen=1 拉屏幕文字列表 */
+$('#btnRefresh').onclick = async () => {
+  const btn = $('#btnRefresh');
+  btn.classList.add('busy');
+  try {
+    const s = await api('/api/status?screen=1');
+    paintStatus(s);
+    const ul = $('#setScreen');
+    ul.innerHTML = '';
+    const list = Array.isArray(s.screen) ? s.screen : [];
+    if (!list.length) {
+      ul.innerHTML = '<li style="color:var(--hint);list-style:none">(屏幕上没读到文字)</li>';
+    } else {
+      list.forEach(t => {
+        const li = document.createElement('li');
+        li.textContent = t;
+        ul.appendChild(li);
+      });
+    }
+    toast('已刷新');
+  } catch (e) {
+    toast('刷新失败:' + e.message, true);
+  } finally {
+    btn.classList.remove('busy');
+  }
+};
 
 /* ================= 应用列表 ================= */
 async function loadApps() {
@@ -332,7 +483,7 @@ async function vol(d) {
 $('#kVolUp').onclick = () => vol(1);
 $('#kVolDn').onclick = () => vol(-1);
 
-/* ================= 触控板:虚拟指针 ================= */
+/* ================= 灵敏度(设置页) ================= */
 let sens = parseFloat(localStorage.getItem('agsens') || '1.5') || 1.5;
 $('#sens').value = sens;
 $('#sensval').textContent = sens.toFixed(1);
@@ -342,7 +493,24 @@ $('#sens').oninput = e => {
   localStorage.setItem('agsens', String(sens));
 };
 
-// 虚拟光标(屏幕 1920×1080,初始中心,localStorage 记忆)
+/* ================= 「搜完自动播放」开关(搜片区 + 设置页,双向同步) ================= */
+function textModel() { return localStorage.getItem('tvtextmodel') || 'Qwen/Qwen3.8-Flash-Next'; }
+function autoPlayEnabled() { return localStorage.getItem('tvautoplay') !== '0'; }
+function applyAutoPlay() {
+  const on = autoPlayEnabled();
+  $('#autoplay').checked = on;
+  $('#autoplaySet').checked = on;
+}
+function setAutoPlay(on) {
+  localStorage.setItem('tvautoplay', on ? '1' : '0');
+  applyAutoPlay();
+}
+$('#autoplay').onchange = e => setAutoPlay(e.target.checked);
+$('#autoplaySet').onchange = e => setAutoPlay(e.target.checked);
+$('#textmodel').value = textModel();
+$('#textmodel').onchange = e => { localStorage.setItem('tvtextmodel', e.target.value); toast('文字模型已切换'); };
+
+/* ================= 触控板:虚拟指针 ================= */
 let cx = clamp(parseFloat(localStorage.getItem('agtx') || '960') || 960, 0, 1919);
 let cy = clamp(parseFloat(localStorage.getItem('agty') || '540') || 540, 0, 1079);
 function savePos() {
@@ -502,17 +670,13 @@ $('#playerbar').addEventListener('click', e => {
   if (b) playerAction(b.dataset.p);
 });
 
-/* ================= 指令三模式 ================= */
-let mode = localStorage.getItem('tvmode2') || 'voice';
+/* ================= 文字指令:📝/⚡ 两模式 ================= */
+let mode = localStorage.getItem('tvmode2') === 'direct' ? 'direct' : 'text';
 
 function applyMode() {
   $$('.modebtn').forEach(b => b.classList.toggle('sel', b.dataset.mode === mode));
-  $('#micwrap').style.display = (mode === 'voice') ? 'flex' : 'none';
-  $('#modehint').textContent =
-    mode === 'voice' ? '按住麦克风说话'
-    : mode === 'text' ? '输入整句指令(可长按输入框用输入法语音转文字)'
-    : '输入片名+选应用,直接搜不经模型';
-  $('#btnGo').textContent = mode === 'voice' ? '搜片' : (mode === 'text' ? '发指令' : '直发');
+  $('#btnCmd').textContent = mode === 'text' ? '发送' : '直发';
+  $('#modehint').textContent = mode === 'text' ? 'Qwen3.5 解析' : '不解析,直发搜片';
   localStorage.setItem('tvmode2', mode);
 }
 $$('.modebtn').forEach(b => b.onclick = () => { mode = b.dataset.mode; applyMode(); });
@@ -532,12 +696,35 @@ function showIntentResult(r) {
   if (res.query && !$('#q').value) $('#q').value = res.query;
 }
 
-/* 搜片类响应(direct 模式 / voice 模式搜片按钮)统一展示 */
+async function sendCmd() {
+  const text = $('#cmd').value.trim();
+  if (!text) return toast('先输入内容', true);
+  if (mode === 'direct') {
+    // ⚡ 直发:用搜片区选好的应用 + 这里的文字直接搜,不经过模型
+    const app = $('#appsel').value;
+    if (!app) return toast('先在下方搜片区选择应用', true);
+    doSearchApi(app, text);
+    return;
+  }
+  $('#btnCmd').classList.add('busy');
+  try {
+    const r = await api('/api/textcmd', { text: text, model: (localStorage.getItem('tvtextmodel') || 'Qwen/Qwen3.8-Flash-Next') });
+    showIntentResult(r);
+  } catch (e) {
+    toast('请求出错:' + e.message, true);
+  } finally {
+    $('#btnCmd').classList.remove('busy');
+  }
+}
+$('#btnCmd').onclick = sendCmd;
+$('#cmd').addEventListener('keydown', e => { if (e.key === 'Enter') sendCmd(); });
+
+/* ================= 搜片(带自动播放开关) ================= */
 async function doSearchApi(app, q) {
   $('#btnGo').classList.add('busy');
-  toast('正在电视上操作…');
+  toast(autoPlayEnabled() ? '正在电视上操作…搜完自动播放' : '正在电视上操作…');
   try {
-    const r = await api('/api/search', { app: app, query: q });
+    const r = await api('/api/search', { app: app, query: q, autoplay: autoPlayEnabled() });
     if (isBlocked(r)) { blockedToast(); return; }
     const lines = [];
     if (r.message) lines.push(r.message);
@@ -553,43 +740,85 @@ async function doSearchApi(app, q) {
   }
 }
 
-$('#btnGo').onclick = async () => {
+function goSearch() {
   const text = $('#q').value.trim();
-  if (!text) return toast('先输入内容', true);
-  if (mode === 'direct') {
-    const app = $('#appsel').value;
-    if (!app) return toast('先选择应用', true);
-    doSearchApi(app, text);
-  } else if (mode === 'text') {
-    $('#btnGo').classList.add('busy');
+  if (!text) return toast('先输入片名', true);
+  const app = $('#appsel').value;
+  if (!app) return toast('先选择应用', true);
+  doSearchApi(app, text);
+}
+$('#btnGo').onclick = goSearch;
+$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') goSearch(); });
+
+/* ================= 语音:双通道(壳 app AndroidMic 优先 / 浏览器 getUserMedia) ================= */
+const MIC_IDLE = '按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span>';
+let recording = false, recStart = 0, recTimer = null;
+let useAndroidMic = false;                    // 本次录音走的通道
+let audioCtx = null, srcNode = null, procNode = null, micStream = null;
+let pcmChunks = [], browserReady = false;     // 浏览器通道采集管线是否就绪
+
+function hasAndroidMic() {
+  try { return !!(window.AndroidMic && typeof window.AndroidMic.start === 'function'); }
+  catch (e) { return false; }
+}
+
+function paintChannel() {
+  const el = $('#voicechan');
+  if (el) el.textContent = hasAndroidMic() ? '通道:手机壳 AndroidMic' : '通道:浏览器麦克风';
+}
+
+function recUIStart() {
+  $('#micbtn').classList.add('rec');
+  $('#micstate').innerHTML = '<b>录音中…</b> 松手发送';
+  let left = 15;
+  clearInterval(recTimer);
+  recTimer = setInterval(() => {
+    left--;
+    $('#micstate').innerHTML = '<b>录音中…</b> ' + left + 's 后自动停止';
+    if (left <= 0) stopRec();   // 15s 上限:页面主动 stop(壳 app 到点也会自己停)
+  }, 1000);
+}
+
+function recUIStop() {
+  clearInterval(recTimer);
+  $('#micbtn').classList.remove('rec');
+}
+
+function startRec() {
+  if (recording) return;
+  recording = true;
+  recStart = Date.now();
+  useAndroidMic = hasAndroidMic();
+  browserReady = false;
+  recUIStart();
+  if (useAndroidMic) {
+    // 壳 app 桥:同步调用,松手后 stop() 取 16k 单声道 WAV 的 base64
     try {
-      const r = await api('/api/textcmd', { text: text });
-      showIntentResult(r);
+      window.AndroidMic.start();
     } catch (e) {
-      toast('请求出错:' + e.message, true);
-    } finally {
-      $('#btnGo').classList.remove('busy');
+      recording = false;
+      recUIStop();
+      $('#micstate').innerHTML = MIC_IDLE;
+      toast('壳 app 录音启动失败:' + e.message, true);
     }
   } else {
-    // 语音模式:搜片按钮保持直发 /api/search 的老行为
-    const app = $('#appsel').value;
-    if (!app) return toast('先选择应用', true);
-    doSearchApi(app, text);
+    startBrowserRec();
   }
-};
-$('#q').addEventListener('keydown', e => { if (e.key === 'Enter') $('#btnGo').click(); });
+}
 
-/* ================= 语音:PCM 采集 → WAV ================= */
-const MIC_IDLE = '按住说话,松手发送<br><span style="color:var(--hint)">最长 15 秒</span>';
-let recording = false, audioCtx = null, srcNode = null, procNode = null, micStream = null;
-let pcmChunks = [], recStart = 0, recTimer = null;
-
-async function startRec() {
-  if (recording) return;
+async function startBrowserRec() {
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (e) {
-    return toast('无法获取麦克风:' + e.message, true);
+    recording = false;
+    recUIStop();
+    $('#micstate').innerHTML = MIC_IDLE;
+    return toast('浏览器下麦克风受限,请使用手机壳 app', true);
+  }
+  if (!recording) {   // 等授权期间用户已松手
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+    return;
   }
   // 目标 16k 采样;浏览器不支持时退默认采样率,WAV 头写真实值即可
   try {
@@ -597,7 +826,6 @@ async function startRec() {
   } catch (e) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   }
-  const rate = audioCtx.sampleRate;
   pcmChunks = [];
   srcNode = audioCtx.createMediaStreamSource(micStream);
   procNode = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -609,35 +837,38 @@ async function startRec() {
   srcNode.connect(procNode);
   procNode.connect(sink);
   sink.connect(audioCtx.destination);
-
-  recording = true;
-  recStart = Date.now();
-  $('#micbtn').classList.add('rec');
-  $('#micstate').innerHTML = '<b>录音中…</b> 松手发送';
-  let left = 15;
-  recTimer = setInterval(() => {
-    left--;
-    $('#micstate').innerHTML = '<b>录音中…</b> ' + left + 's 后自动停止';
-    if (left <= 0) stopRec();
-  }, 1000);
+  browserReady = true;
 }
 
 function stopRec() {
   if (!recording) return;
   recording = false;
-  clearInterval(recTimer);
-  $('#micbtn').classList.remove('rec');
+  recUIStop();
+  const dur = (Date.now() - recStart) / 1000;
+  if (useAndroidMic) {
+    let b64 = '';
+    try { b64 = window.AndroidMic.stop(); } catch (e) { b64 = ''; }
+    $('#micstate').innerHTML = MIC_IDLE;
+    if (dur < 0.4) return toast('说话太短', true);
+    if (!b64) return toast('录音失败(壳 app 未返回音频)', true);
+    $('#micstate').textContent = '识别中…';
+    api('/api/asr', { audio_base64: b64, mime: 'audio/wav' })
+      .then(r => showIntentResult(r))
+      .catch(e => toast('识别失败:' + e.message, true))
+      .then(() => { $('#micstate').innerHTML = MIC_IDLE; });
+    return;
+  }
+  // 浏览器通道:停流 → 编码 WAV → 上传(原逻辑)
   const rate = audioCtx ? audioCtx.sampleRate : 16000;
   try { if (procNode) procNode.disconnect(); } catch (e) {}
   try { if (srcNode) srcNode.disconnect(); } catch (e) {}
   if (micStream) micStream.getTracks().forEach(t => t.stop());
   try { if (audioCtx) audioCtx.close(); } catch (e) {}
   procNode = null; srcNode = null; micStream = null; audioCtx = null;
-
-  const dur = (Date.now() - recStart) / 1000;
-  if (dur < 0.4) {
+  if (!browserReady || dur < 0.4) {
+    pcmChunks = [];
     $('#micstate').innerHTML = MIC_IDLE;
-    return toast('说话太短', true);
+    return toast(dur < 0.4 ? '说话太短' : '麦克风还没就绪,再按一次', true);
   }
   $('#micstate').textContent = '识别中…';
   const wav = encodeWav(pcmChunks, rate);
@@ -725,15 +956,19 @@ $('#btnTextFill').onclick = () => sendText(false);
 $('#btnTextSearch').onclick = () => sendText(true);
 $('#txt').addEventListener('keydown', e => { if (e.key === 'Enter') sendText(false); });
 
-/* ================= 结果区 ================= */
+/* ================= 结果展示(语音/文字两页共用,同步写两份) ================= */
 function showResult(text) {
-  const el = $('#result');
-  el.textContent = text;
-  el.classList.add('show');
+  $$('.resultbox').forEach(el => {
+    el.textContent = text;
+    el.classList.add('show');
+  });
 }
 
 /* ================= 初始化 ================= */
+showTab(localStorage.getItem('tvtab') || 'touch');
 applyMode();
+applyAutoPlay();
+paintChannel();
 refreshStatus();
 loadApps();
 setInterval(refreshStatus, 10000);
