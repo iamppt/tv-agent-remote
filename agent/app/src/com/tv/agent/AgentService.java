@@ -2,10 +2,16 @@
  * AgentService.java —— 无障碍执行器(电视Agent 的"手")
  *
  * 职责:
- *   · 被系统无障碍绑定后常驻;instance 供 HttpService 判断/调用(onServiceConnected 赋值,onDestroy 置 null)
+ *   · 被系统无障碍绑定后常驻;instance 供 HTTP 侧判断/调用(onServiceConnected 赋值,onDestroy 置 null)
+ *   · onServiceConnected 会幂等拉起 HttpServerCore(HTTP 服务器托管进无障碍服务:
+ *     前台 HttpService 被杀后,系统重新绑定本服务时 HTTP 随之复活);onDestroy 调
+ *     HttpServerCore.stop() 停掉(HttpService 下次 onStartCommand 会兜底拉起)
  *   · global/back/home:全局返回键、主页键(GLOBAL_ACTION_BACK=1 / GLOBAL_ACTION_HOME=2)
  *   · tap/swipe:dispatchGesture 合成触摸(小米电视 MiTV-ASSU0,Android 14,
- *     无触摸屏但合成触摸有效;1920×1080 坐标系)
+ *     无触摸屏但合成触摸有效;1920×1080 坐标系)。swipe 仍用于翻页/快进手势;
+ *     tap 不再服务手机端轻点,只留作节点中心兜底/播放器中央等内部用途
+ *   · clickContainerAt:坐标轻点 = 容器点击(找包含坐标的最深节点,自身可点则 ACTION_CLICK,
+ *     否则向上最多 6 层找可点祖先;/api/tap 即此语义,实测影视仓卡片唯一有效路径)
  *   · clickText:按文字找节点并点击(精确匹配优先,避免把「搜索历史」当成「搜索」点下去)
  *   · setTextIntoField:找 EditText 灌字并回读核对,失败重试一次
  *   · screenTexts:按位置排序收集当前屏幕可见文字,给手机端展示
@@ -68,11 +74,21 @@ public class AgentService extends AccessibilityService {
         super.onServiceConnected();
         instance = this;
         Log.i(TAG, "无障碍服务已连接");
+        // HTTP 托管进无障碍服务:前台 HttpService 被杀后,系统重新绑定本服务时
+        // HTTP 随之复活。startIfNotRunning 幂等:服务器已在跑返回 false,不会重复绑端口。
+        try {
+            HttpServerCore.startIfNotRunning(this);
+        } catch (Throwable t) {
+            Log.w(TAG, "拉起 HttpServerCore 失败", t);
+        }
     }
 
     @Override
     public void onDestroy() {
         instance = null;
+        // 无障碍被系统解绑时停掉托管的 HTTP;HttpService 还活着的话,其下次
+        // onStartCommand 会兜底拉起(两个服务都死了 HTTP 才真正下线)
+        HttpServerCore.stop();
         if (markerHide != null) uiHandler.removeCallbacks(markerHide);
         uiHandler.post(new Runnable() {
             @Override public void run() { hideMarker(); }
@@ -367,9 +383,14 @@ public class AgentService extends AccessibilityService {
         return tapNodeCenter(n);
     }
 
-    /** [调试] 点击 (x,y) 处节点的可点祖先(含自身):
-     *  找包含该点的最浅可点节点,对它 ACTION_CLICK。用于验证容器点击假设。 */
-    public String debugClickContainerAt(int x, int y) {
+    /**
+     * 容器点击(手机端轻点语义的唯一实现,/api/tap 直达这里):
+     * 找包含 (x,y) 的最深节点 → 自身可点则 ACTION_CLICK,否则向上最多 6 层找可点祖先;
+     * 返回 info 字符串说明命中了什么/点了哪层(no root / no node at point /
+     * no clickable ancestor / hit=类名@bounds ... clicked=..)。实测影视仓卡片:
+     * 文字节点不可点也不响应合成触摸,只有爬到容器执行 ACTION_CLICK 有效。
+     */
+    public String clickContainerAt(int x, int y) {
         StringBuilder info = new StringBuilder();
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
