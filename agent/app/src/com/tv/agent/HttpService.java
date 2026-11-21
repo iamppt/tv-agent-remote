@@ -448,7 +448,15 @@ public class HttpService extends Service {
             if ("POST".equals(method) && "/api/swipe".equals(path))  { handleSwipe(req, out); return; }
             if ("POST".equals(method) && "/api/vol".equals(path))    { handleVol(req, out); return; }
             if ("POST".equals(method) && "/api/text".equals(path))   { handleText(req, out); return; }
-            if ("POST".equals(method) && "/api/click".equals(path))  { handleClick(req, out); return; }
+            if ("POST".equals(method) && "/api/dbgclick".equals(path)) {
+                    JSONObject rr = new JSONObject();
+                    rr.put("ok", true);
+                    rr.put("info", AgentService.instance.debugClickContainerAt(
+                            (int) req.optDouble("x", 0), (int) req.optDouble("y", 0)));
+                    respond(out, 200, rr.toString());
+                    return;
+                }
+                if ("POST".equals(method) && "/api/click".equals(path))  { handleClick(req, out); return; }
             if ("POST".equals(method) && "/api/launch".equals(path)) { handleLaunch(req, out); return; }
             if ("POST".equals(method) && "/api/search".equals(path)) { handleSearch(req, out); return; }
             if ("POST".equals(method) && "/api/asr".equals(path))    { handleAsr(req, out); return; }
@@ -1021,31 +1029,49 @@ public class HttpService extends Service {
         try {
             // ① 等结果屏稳定
             sleepQuiet(3000);
-            // ② 点开第一个结果卡片
-            boolean opened = a.clickText("┃");
-            if (opened) {
-                steps.put("自动播放:点开第一个线路卡片");
-            } else {
-                String pick = null;
-                List<String> texts = a.screenTexts(20);
-                for (String t : texts) {
-                    if (t == null || t.isEmpty()) continue;
-                    if (t.contains("全部显示") || t.contains("搜索")) continue;
-                    if (query != null && !query.isEmpty() && t.contains(query)) continue;   // 跳过搜索框里的片名
-                    pick = t;
-                    break;
-                }
-                if (pick == null || !a.clickText(pick)) {
-                    steps.put("自动播放中断:没找到可点的结果卡片");
-                    r.put("screen", screenArr(a, 10));
-                    return;
-                }
-                steps.put("自动播放:点开「" + truncate(pick, 12) + "」");
+            // ② 点开第一个结果卡片:结果网格的卡片标题含片名(query),
+            //    tryClick 会沿标题节点爬到可点容器执行 ACTION_CLICK(实测唯一有效路径)。
+            //    注意:左栏的「xx┃xx」是播放源筛选,不是结果卡,不要点。
+            List<String> texts = a.screenTexts(24);
+            String pick = null;
+            for (String t : texts) {
+                if (t == null || t.isEmpty()) continue;
+                if (t.contains("全部显示") || t.contains("搜索") || t.contains("┃")) continue;
+                if (t.contains("(") && t.contains(")")) continue;          // 「搜索(19/32)」这类
+                if (t.contains("集") || t.contains("完结")) continue;      // 「全30集」「已完结」角标
+                if (query != null && !query.isEmpty() && query.equals(t)) continue;  // 搜索框里的片名
+                pick = t;
+                break;
             }
+            if (pick == null) pick = query;   // 兜底:直接按片名找(标题通常就是片名或含片名)
+            if (!a.clickText(pick)) {
+                steps.put("自动播放中断:没找到可点的结果卡片");
+                r.put("screen", screenArr(a, 10));
+                return;
+            }
+            steps.put("自动播放:点开「" + truncate(pick, 12) + "」");
             // ③ 等进详情页
             sleepQuiet(4000);
-            // ④ 点播放,找不到节点改点屏幕中心偏下
-            if (a.clickText("播放")) {
+            // ③b. 部分片源会先弹「选择线路」清单:出现了就点第一条非 18+ 线路
+            List<String> now = a.screenTexts(24);
+            String lineText = null;
+            for (String t : now) {
+                if (t.contains("选择线路") || t.contains("线路缓存")) { lineText = "__popup__"; break; }
+            }
+            if ("__popup__".equals(lineText)) {
+                for (String t : now) {
+                    if (t.contains("┃") && !t.contains("18+") && t.length() > 4) { lineText = t; break; }
+                }
+                if (lineText != null && !"__popup__".equals(lineText)) {
+                    a.clickText(lineText);
+                    steps.put("自动播放:选线路「" + truncate(lineText, 12) + "」");
+                    sleepQuiet(4000);
+                }
+            }
+            // ④ 选集/播放:详情页通常是「第1集」或集数格;找不到就点屏幕中心偏下
+            if (a.clickText("第1集") || a.clickText("1")) {
+                steps.put("自动播放:选第 1 集");
+            } else if (a.clickText("播放")) {
                 steps.put("自动播放:点「播放」");
             } else {
                 a.tap(960, 700);

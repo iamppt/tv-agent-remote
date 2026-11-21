@@ -351,9 +351,65 @@ public class AgentService extends AccessibilityService {
     private boolean tryClick(AccessibilityNodeInfo n) {
         try {
             if (n.isClickable() && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
-            return tapNodeCenter(n);
+        } catch (Throwable ignored) { }
+        // 影视仓这类 TV 应用:卡片/选集格子的点击监听挂在容器上,
+        // 文字 TextView 本身不可点也不响应合成触摸——必须向上爬到
+        // 可点容器执行 ACTION_CLICK(实测有效);坐标 tap 全程无效。
+        AccessibilityNodeInfo p = n.getParent();
+        for (int i = 0; i < 5 && p != null; i++) {
+            try {
+                if (p.isClickable() && p.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
+            } catch (Throwable ignored) { }
+            AccessibilityNodeInfo gp = p.getParent();
+            p = gp;
+        }
+        // 最后才用坐标兜底
+        return tapNodeCenter(n);
+    }
+
+    /** [调试] 点击 (x,y) 处节点的可点祖先(含自身):
+     *  找包含该点的最浅可点节点,对它 ACTION_CLICK。用于验证容器点击假设。 */
+    public String debugClickContainerAt(int x, int y) {
+        StringBuilder info = new StringBuilder();
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return "no root";
+            final Rect pt = new Rect(x, y, x + 1, y + 1);
+            final AccessibilityNodeInfo[] hit = { null, null };   // [最深命中, 最浅可点祖先]
+            boundedDfs(root, new NodeSink() {
+                @Override public boolean onNode(AccessibilityNodeInfo n) {
+                    Rect r = new Rect();
+                    n.getBoundsInScreen(r);
+                    if (!r.contains(x, y)) return true;
+                    hit[0] = n;
+                    if (n.isClickable() && hit[1] == null) hit[1] = n;
+                    return hit[1] == null || hit[0] == null;
+                }
+            }, new HashSet<AccessibilityNodeInfo>(), new int[1], 0);
+            if (hit[0] == null) return "no node at point";
+            if (hit[1] == null) {
+                // 向上找可点祖先
+                AccessibilityNodeInfo p = hit[0].getParent();
+                for (int i = 0; i < 6 && p != null; i++) {
+                    Rect r = new Rect();
+                    p.getBoundsInScreen(r);
+                    info.append("->").append(p.getClassName()).append("@").append(r);
+                    if (p.isClickable()) { hit[1] = p; break; }
+                    AccessibilityNodeInfo gp = p.getParent();
+                    p = gp;
+                }
+            }
+            Rect hr = new Rect(); hit[0].getBoundsInScreen(hr);
+            info.insert(0, "hit=" + hit[0].getClassName() + "@" + hr + "; ");
+            if (hit[1] != null) {
+                boolean ok = hit[1].performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                info.append(" clicked=").append(ok);
+                return info.toString();
+            }
+            info.append(" no clickable ancestor");
+            return info.toString();
         } catch (Throwable t) {
-            return tapNodeCenter(n);
+            return "err:" + t;
         }
     }
 
