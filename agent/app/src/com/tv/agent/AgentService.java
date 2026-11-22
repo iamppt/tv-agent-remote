@@ -10,7 +10,7 @@
  *   · tap/swipe:dispatchGesture 合成触摸(小米电视 MiTV-ASSU0,Android 14,
  *     无触摸屏但合成触摸有效;1920×1080 坐标系)。swipe 仍用于翻页/快进手势;
  *     tap 不再服务手机端轻点,只留作节点中心兜底/播放器中央等内部用途
- *   · clickContainerAt:坐标轻点 = 容器点击(找包含坐标的最深节点,自身可点则 ACTION_CLICK,
+ *   · clickAt:坐标三级点击(下探→可点祖先→手势兜底);
  *     否则向上最多 6 层找可点祖先;/api/tap 即此语义,实测影视仓卡片唯一有效路径)
  *   · clickText:按文字找节点并点击(精确匹配优先,避免把「搜索历史」当成「搜索」点下去)
  *   · setTextIntoField:找 EditText 灌字并回读核对,失败重试一次
@@ -390,50 +390,77 @@ public class AgentService extends AccessibilityService {
      * no clickable ancestor / hit=类名@bounds ... clicked=..)。实测影视仓卡片:
      * 文字节点不可点也不响应合成触摸,只有爬到容器执行 ACTION_CLICK 有效。
      */
-    public String clickContainerAt(int x, int y) {
-        StringBuilder info = new StringBuilder();
+    /**
+     * 按坐标点击(三级策略):
+     *   ① 按坐标下探:从根开始,每层只走包含 (x,y) 的子节点(十几次 IPC 就到叶子,
+     *      不受全树大小影响)→ 从叶子向上最多 8 层找可点祖先 → ACTION_CLICK。
+     *      影视仓等标准 View 应用走这条,实测有效。
+     *   ② 祖先全都不可点(百度网盘/云视听/小米桌面等自绘或无监听界面):
+     *      回退合成触摸坐标点击(dispatchGesture,桌面/播放器实测有效)。
+     *   ③ 都失败返回原因,前端可见。
+     */
+    public String clickAt(int x, int y) {
         try {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
-            if (root == null) return "no root";
-            final Rect pt = new Rect(x, y, x + 1, y + 1);
-            final AccessibilityNodeInfo[] hit = { null, null };   // [最深命中, 最浅可点祖先]
-            boundedDfs(root, new NodeSink() {
-                @Override public boolean onNode(AccessibilityNodeInfo n) {
-                    Rect r = new Rect();
-                    n.getBoundsInScreen(r);
-                    if (!r.contains(x, y)) return true;
-                    hit[0] = n;
-                    if (n.isClickable() && hit[1] == null) hit[1] = n;
-                    return hit[1] == null || hit[0] == null;
+            AccessibilityNodeInfo root = null;
+            try {
+                List<AccessibilityWindowInfo> wins = getWindows();
+                if (wins != null) {
+                    for (AccessibilityWindowInfo w : wins) {
+                        if (w == null) continue;
+                        if (w.getType() == AccessibilityWindowInfo.TYPE_APPLICATION && w.isFocused()) {
+                            root = w.getRoot();
+                            if (root != null) break;
+                        }
+                    }
                 }
-            }, new HashSet<AccessibilityNodeInfo>(), new int[1], 0);
-            if (hit[0] == null) return "no node at point";
-            if (hit[1] == null) {
-                // 向上找可点祖先
-                AccessibilityNodeInfo p = hit[0].getParent();
-                for (int i = 0; i < 6 && p != null; i++) {
-                    Rect r = new Rect();
-                    p.getBoundsInScreen(r);
-                    info.append("->").append(p.getClassName()).append("@").append(r);
-                    if (p.isClickable()) { hit[1] = p; break; }
-                    AccessibilityNodeInfo gp = p.getParent();
-                    p = gp;
+            } catch (Throwable ignored) { }
+            if (root == null) root = getRootInActiveWindow();
+            if (root == null) return "no root(无障碍未就绪)";
+
+            Rect rr = new Rect();
+            root.getBoundsInScreen(rr);
+            if (!rr.contains(x, y)) return "point outside root";
+
+            // ① 坐标下探
+            AccessibilityNodeInfo cur = root;
+            int depth = 0;
+            while (depth < 30) {
+                AccessibilityNodeInfo next = null;
+                int n = cur.getChildCount();
+                for (int i = 0; i < n; i++) {
+                    AccessibilityNodeInfo c = cur.getChild(i);
+                    if (c == null) continue;
+                    Rect cr = new Rect();
+                    c.getBoundsInScreen(cr);
+                    if (cr.contains(x, y)) { next = c; break; }
                 }
+                if (next == null) break;
+                cur = next;
+                depth++;
             }
-            Rect hr = new Rect(); hit[0].getBoundsInScreen(hr);
-            info.insert(0, "hit=" + hit[0].getClassName() + "@" + hr + "; ");
-            if (hit[1] != null) {
-                boolean ok = hit[1].performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                info.append(" clicked=").append(ok);
-                return info.toString();
+            // ② 爬可点祖先
+            AccessibilityNodeInfo p = cur;
+            for (int i = 0; i < 8 && p != null; i++) {
+                Rect pr = new Rect();
+                p.getBoundsInScreen(pr);
+                if (p.isClickable()) {
+                    boolean ok = false;
+                    try { ok = p.performAction(AccessibilityNodeInfo.ACTION_CLICK); } catch (Throwable ignored) { }
+                    if (ok) return "container:" + p.getClassName() + "@" + pr;
+                    // ACTION_CLICK 返回 false 也别死磕,继续向上
+                }
+                p = p.getParent();
             }
-            info.append(" no clickable ancestor");
-            return info.toString();
+            // ③ 手势兜底(自绘/无监听界面)
+            boolean g = tap(x, y);
+            return "gesture:" + g;
         } catch (Throwable t) {
-            return "err:" + t;
+            // 结构读取失败 → 纯手势兜底
+            return "gesture:" + tap(x, y);
         }
     }
 
+    /** 对节点 bounds 中心做合成触摸(节点本身不可点时的兜底) */
     /** 对节点 bounds 中心做合成触摸(节点本身不可点时的兜底) */
     private boolean tapNodeCenter(AccessibilityNodeInfo n) {
         try {

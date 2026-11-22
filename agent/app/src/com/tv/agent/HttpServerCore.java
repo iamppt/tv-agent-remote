@@ -492,7 +492,7 @@ public class HttpServerCore {
             if ("POST".equals(method) && "/api/dbgclick".equals(path)) {
                 JSONObject rr = new JSONObject();
                 rr.put("ok", true);
-                rr.put("info", AgentService.instance.clickContainerAt(
+                rr.put("info", AgentService.instance.clickAt(
                         (int) req.optDouble("x", 0), (int) req.optDouble("y", 0)));
                 respond(out, 200, rr.toString());
                 return;
@@ -584,7 +584,7 @@ public class HttpServerCore {
         if (a == null) throw new IllegalStateException("电视上未开启无障碍服务");
         int x = needInt(req, "x"), y = needInt(req, "y");
         String info;
-        synchronized (opLock) { info = a.clickContainerAt(x, y); }
+        synchronized (opLock) { info = a.clickAt(x, y); }
         JSONObject r = new JSONObject();
         r.put("ok", true);
         r.put("info", info);

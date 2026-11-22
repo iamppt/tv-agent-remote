@@ -212,6 +212,9 @@
 
   <!-- ===== 【触摸】触控板 + 小圆钮 + 播放控制 + 键盘输入 ===== -->
   <section id="tab-touch">
+    <div class="sec-title">应用快捷启动(桌面图标点不动就用这个)</div>
+    <div class="row" id="quicklaunch"></div>
+    <div class="hint">系统桌面(小米桌面)对模拟点击免疫,开应用请用这里或语音「打开xx」;触控板用于应用内操作</div>
     <div id="padbar">
       <span class="t">指针</span>
       <div class="padkeys">
@@ -475,6 +478,22 @@ async function loadApps() {
     sel.appendChild(o);
   });
 }
+function renderQuickLaunch() {
+  api('/api/apps').then(d => {
+    const box = $('#quicklaunch');
+    if (!box) return;
+    box.innerHTML = '';
+    (d.apps || []).filter(a => a.installed !== false && a.pkg).forEach(a => {
+      const b = document.createElement('button');
+      b.className = 'pill';
+      b.textContent = a.name;
+      b.onclick = () => api('/api/launch', { app: a.name }).then(r => toast(r.message || ('已打开 ' + a.name))).catch(e => toast('打开失败:' + e.message, true));
+      box.appendChild(b);
+    });
+    if (!box.children.length) box.innerHTML = '<span style="color:var(--hint)">apps.json 未配置应用</span>';
+  }).catch(() => {});
+}
+renderQuickLaunch();
 $('#appsel').addEventListener('change', e => localStorage.setItem('agapp', e.target.value));
 
 /* ================= 顶栏小圆钮 ================= */
