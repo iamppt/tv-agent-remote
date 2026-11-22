@@ -324,6 +324,13 @@
       </select>
     </div>
 
+    <div class="sec-title">唤醒电视(深度待机时用)</div>
+    <div class="setrow">
+      <input type="text" id="tvmac" placeholder="电视 MAC(如 0C:A2:80:3B:1A:66)" style="flex:1">
+      <button class="pill" id="btnWake">唤醒</button>
+    </div>
+    <div class="hint">仅壳 app 有效(浏览器发不了 UDP)。电视需先在 设置→网络 里启用「网络唤醒/待机唤醒」;唤醒后 30~60 秒开机,本页自动恢复。</div>
+
     <div class="sec-title">模式说明</div>
     <div class="card">
       🎤 语音 = 录音上传,硅基流动 Qwen3-Omni 解析<br>
@@ -507,6 +514,16 @@ function setAutoPlay(on) {
 }
 $('#autoplay').onchange = e => setAutoPlay(e.target.checked);
 $('#autoplaySet').onchange = e => setAutoPlay(e.target.checked);
+$('#tvmac').value = localStorage.getItem('tvwolmac') || '0C:A2:80:3B:1A:66';
+$('#btnWake').onclick = function() {
+  const mac = $('#tvmac').value.trim();
+  localStorage.setItem('tvwolmac', mac);
+  if (window.AndroidWake && AndroidWake.wol) {
+    toast(AndroidWake.wol(mac));
+  } else {
+    toast('浏览器发不了唤醒包,请用手机壳 app', true);
+  }
+};
 $('#textmodel').value = textModel();
 $('#textmodel').onchange = e => { localStorage.setItem('tvtextmodel', e.target.value); toast('文字模型已切换'); };
 

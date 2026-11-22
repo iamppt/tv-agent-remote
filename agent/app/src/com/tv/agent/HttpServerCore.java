@@ -161,15 +161,38 @@ public class HttpServerCore {
      */
     public static synchronized boolean startIfNotRunning(Context ctx) {
         HttpServerCore cur = instance;
-        if (cur != null && cur.running) return false;
-        final HttpServerCore core = new HttpServerCore(ctx);
-        core.running = true;
-        instance = core;
-        Thread t = new Thread(new Runnable() {
-            @Override public void run() { core.acceptLoop(); }
-        }, "agent-http-accept");
-        t.start();
-        return true;
+        boolean fresh = false;
+        if (cur == null || !cur.running) {
+            final HttpServerCore core = new HttpServerCore(ctx);
+            core.running = true;
+            instance = core;
+            Thread t = new Thread(new Runnable() {
+                @Override public void run() { core.acceptLoop(); }
+            }, "agent-http-accept");
+            t.start();
+            fresh = true;
+        }
+        scheduleReviveAlarm(ctx.getApplicationContext());   // 进程被杀后的复活闹钟(每次都重注册,幂等)
+        return fresh;
+    }
+
+    /** 进程被系统整个杀掉后的复活机制:AlarmManager 闹钟注册在系统里,
+     *  进程死了照样到点触发 WakeReceiver → startIfNotRunning 拉起。
+     *  每 10 分钟一次,ELAPSED_REALTIME_WAKEUP(电视待机也会触发)。 */
+    private static void scheduleReviveAlarm(Context ctx) {
+        try {
+            android.app.AlarmManager am = (android.app.AlarmManager)
+                    ctx.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) return;
+            android.app.PendingIntent pi = android.app.PendingIntent.getBroadcast(
+                    ctx, 1001,
+                    new android.content.Intent(ctx, com.tv.agent.WakeReceiver.class),
+                    android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+            long trigger = android.os.SystemClock.elapsedRealtime() + 10 * 60 * 1000L;
+            am.setAndAllowWhileIdle(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
+        } catch (Throwable t) {
+            android.util.Log.w("AgentCore", "复活闹钟注册失败:" + t);
+        }
     }
 
     /** 停止服务器并清掉单例(AgentService.onDestroy 调;HttpService.onDestroy 故意不调) */
