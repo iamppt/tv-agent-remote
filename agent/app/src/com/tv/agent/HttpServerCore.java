@@ -188,8 +188,9 @@ public class HttpServerCore {
                     ctx, 1001,
                     new android.content.Intent(ctx, com.tv.agent.WakeReceiver.class),
                     android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
-            long trigger = android.os.SystemClock.elapsedRealtime() + 10 * 60 * 1000L;
-            am.setAndAllowWhileIdle(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
+            long trigger = android.os.SystemClock.elapsedRealtime() + 5 * 60 * 1000L;
+            // 精确闹钟:非精确闹钟在电视省电模式下会被无限推迟(实测进程死后一直没复活的原因)
+            am.setExactAndAllowWhileIdle(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, trigger, pi);
         } catch (Throwable t) {
             android.util.Log.w("AgentCore", "复活闹钟注册失败:" + t);
         }
